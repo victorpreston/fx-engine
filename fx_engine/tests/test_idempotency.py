@@ -1,15 +1,19 @@
 """
 Idempotency tests.
 
-The Idempotency-Key header ensures that client retries do not cause
-double execution.  The key lookup and execute happen inside the same
-database transaction, preventing TOCTOU races under concurrent retries.
+Sequential tests use the HTTP client.  The concurrent-retry test calls
+execute_quote() directly to avoid the asyncpg event-loop binding issue
+that arises when asyncio.gather + ASGITransport are combined (see
+test_concurrency.py for a full explanation).
 """
 from __future__ import annotations
 
 import asyncio
 import uuid
 from decimal import Decimal
+
+from app import fx_engine
+from app.database import get_pool
 
 
 async def test_same_idempotency_key_returns_identical_response(client, funded_customer, pending_quote):
@@ -38,28 +42,23 @@ async def test_idempotent_retry_does_not_debit_twice(client, funded_customer, pe
     quote_id = pending_quote["quote_id"]
     customer_id = funded_customer["id"]
 
-    await client.post(
-        f"/quotes/{quote_id}/execute",
-        json={"customer_id": customer_id},
-        headers={"Idempotency-Key": key},
-    )
-    await client.post(
-        f"/quotes/{quote_id}/execute",
-        json={"customer_id": customer_id},
-        headers={"Idempotency-Key": key},
-    )
+    for _ in range(3):
+        await client.post(
+            f"/quotes/{quote_id}/execute",
+            json={"customer_id": customer_id},
+            headers={"Idempotency-Key": key},
+        )
 
     balances_resp = await client.get(f"/customers/{customer_id}/balances")
     balances = {b["currency"]: Decimal(b["amount"]) for b in balances_resp.json()["balances"]}
 
-    # 1000 USD - 100 USD = 900 USD.  If debited twice it would be 800.
+    # 1000 USD - 100 USD = 900. If debited more than once it would be lower.
     assert balances["USD"] == Decimal("900.00"), (
         f"USD balance is {balances['USD']} — double-debit occurred"
     )
 
 
 async def test_different_idempotency_keys_are_independent(client, funded_customer):
-    """Two different quotes with different keys must both succeed independently."""
     await client.post(
         f"/customers/{funded_customer['id']}/balances/credit",
         json={"currency": "USD", "amount": "1000.00"},
@@ -92,42 +91,43 @@ async def test_different_idempotency_keys_are_independent(client, funded_custome
     assert r1.json()["transaction_id"] != r2.json()["transaction_id"]
 
 
-async def test_concurrent_retry_with_same_key_executes_exactly_once(client, funded_customer, pending_quote):
+async def test_concurrent_retry_with_same_key_executes_exactly_once(funded_customer, pending_quote):
     """
     N concurrent retries with the same idempotency key must produce exactly
-    one database write.  This tests the TOCTOU safety of the idempotency
-    check being inside the same transaction as the execute.
+    one database write.
+
+    Calls execute_quote() directly to avoid asyncpg event-loop issues with
+    concurrent ASGITransport requests (same reasoning as test_concurrency.py).
     """
     key = str(uuid.uuid4())
     quote_id = pending_quote["quote_id"]
     customer_id = funded_customer["id"]
+    pool = await get_pool()
     N = 10
 
     results = await asyncio.gather(
         *[
-            client.post(
-                f"/quotes/{quote_id}/execute",
-                json={"customer_id": customer_id},
-                headers={"Idempotency-Key": key},
+            fx_engine.execute_quote(
+                pool=pool,
+                customer_id=customer_id,
+                quote_id=quote_id,
+                idempotency_key=key,
             )
             for _ in range(N)
-        ]
+        ],
+        return_exceptions=True,
     )
 
-    statuses = [r.status_code for r in results]
-    # All responses must be 200 (idempotent replay) — none should be 500.
-    assert all(s == 200 for s in statuses), (
-        f"Expected all 200, got: {sorted(statuses)}"
-    )
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert not errors, f"Unexpected errors: {[str(e) for e in errors]}"
 
-    # All responses must return the same transaction_id.
-    tx_ids = {r.json()["transaction_id"] for r in results}
+    # All results must be the same transaction record.
+    tx_ids = {str(r["id"]) for r in results}
     assert len(tx_ids) == 1, f"Got multiple transaction IDs: {tx_ids}"
 
-    # Exactly one row in transactions.
-    pool = await __import__("app.database", fromlist=["get_pool"]).get_pool()
+    # Exactly one row in the DB.
     async with pool.acquire() as conn:
         count = await conn.fetchval(
             "SELECT COUNT(*) FROM transactions WHERE quote_id = $1", quote_id
         )
-    assert count == 1
+    assert count == 1, f"Expected 1 transaction row, found {count}"
