@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+import asyncpg
+import structlog
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.database import get_connection
+from app.exceptions import CustomerNotFoundError
+from app.schemas import (
+    BalancesResponse,
+    BalanceItem,
+    CreditRequest,
+    CustomerCreate,
+    CustomerResponse,
+)
+
+router = APIRouter(prefix="/customers", tags=["customers"])
+log = structlog.get_logger(__name__)
+
+
+@router.post("", response_model=CustomerResponse, status_code=201)
+async def create_customer(
+    body: CustomerCreate,
+    conn: asyncpg.Connection = Depends(get_connection),
+):
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO customers (name, email)
+            VALUES ($1, $2)
+            RETURNING *
+            """,
+            body.name,
+            body.email,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    log.info("customer_created", customer_id=str(row["id"]), email=body.email)
+    return dict(row)
+
+
+@router.get("/{customer_id}", response_model=CustomerResponse)
+async def get_customer(
+    customer_id: str,
+    conn: asyncpg.Connection = Depends(get_connection),
+):
+    row = await conn.fetchrow(
+        "SELECT * FROM customers WHERE id = $1", customer_id
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return dict(row)
+
+
+@router.get("/{customer_id}/balances", response_model=BalancesResponse)
+async def get_balances(
+    customer_id: str,
+    conn: asyncpg.Connection = Depends(get_connection),
+):
+    customer = await conn.fetchrow(
+        "SELECT id FROM customers WHERE id = $1", customer_id
+    )
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    rows = await conn.fetch(
+        "SELECT currency, amount FROM balances WHERE customer_id = $1 ORDER BY currency",
+        customer_id,
+    )
+    return {
+        "customer_id": customer_id,
+        "balances": [{"currency": r["currency"], "amount": Decimal(str(r["amount"]))} for r in rows],
+    }
+
+
+@router.post("/{customer_id}/balances/credit", response_model=BalanceItem, status_code=200)
+async def credit_balance(
+    customer_id: str,
+    body: CreditRequest,
+    conn: asyncpg.Connection = Depends(get_connection),
+):
+    """
+    Test fixture — manually credit a customer's balance.
+    Not exposed in production; exists to bootstrap test scenarios.
+    """
+    customer = await conn.fetchrow(
+        "SELECT id FROM customers WHERE id = $1", customer_id
+    )
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    row = await conn.fetchrow(
+        """
+        INSERT INTO balances (customer_id, currency, amount)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (customer_id, currency)
+        DO UPDATE SET amount = balances.amount + EXCLUDED.amount, updated_at = NOW()
+        RETURNING currency, amount
+        """,
+        customer_id,
+        body.currency,
+        str(body.amount),
+    )
+    log.info(
+        "balance_credited",
+        customer_id=customer_id,
+        currency=body.currency,
+        amount=str(body.amount),
+    )
+    return {"currency": row["currency"], "amount": Decimal(str(row["amount"]))}
