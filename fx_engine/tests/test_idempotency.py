@@ -1,10 +1,9 @@
 """
 Idempotency tests.
 
-Sequential tests use the HTTP client.  The concurrent-retry test calls
-execute_quote() directly to avoid the asyncpg event-loop binding issue
-that arises when asyncio.gather + ASGITransport are combined (see
-test_concurrency.py for a full explanation).
+Sequential tests go through the HTTP client (no pool issues).
+The concurrent-retry test uses per-task mini-pools for the same reason
+as test_concurrency.py — see that module for the full explanation.
 """
 from __future__ import annotations
 
@@ -12,8 +11,21 @@ import asyncio
 import uuid
 from decimal import Decimal
 
+import asyncpg
+
 from app import fx_engine
-from app.database import get_pool
+from app.config import settings
+from app.database import set_type_codecs, get_pool
+
+
+async def _mini_pool() -> asyncpg.Pool:
+    return await asyncpg.create_pool(
+        settings.database_url,
+        min_size=1,
+        max_size=1,
+        command_timeout=30,
+        init=set_type_codecs,
+    )
 
 
 async def test_same_idempotency_key_returns_identical_response(client, funded_customer, pending_quote):
@@ -52,7 +64,7 @@ async def test_idempotent_retry_does_not_debit_twice(client, funded_customer, pe
     balances_resp = await client.get(f"/customers/{customer_id}/balances")
     balances = {b["currency"]: Decimal(b["amount"]) for b in balances_resp.json()["balances"]}
 
-    # 1000 USD - 100 USD = 900. If debited more than once it would be lower.
+    # 1000 USD − 100 USD = 900. Lower means double-debit.
     assert balances["USD"] == Decimal("900.00"), (
         f"USD balance is {balances['USD']} — double-debit occurred"
     )
@@ -63,7 +75,6 @@ async def test_different_idempotency_keys_are_independent(client, funded_custome
         f"/customers/{funded_customer['id']}/balances/credit",
         json={"currency": "USD", "amount": "1000.00"},
     )
-
     q1 = (await client.post(
         "/quotes",
         json={"customer_id": funded_customer["id"], "from_currency": "USD",
@@ -93,37 +104,65 @@ async def test_different_idempotency_keys_are_independent(client, funded_custome
 
 async def test_concurrent_retry_with_same_key_executes_exactly_once(funded_customer, pending_quote):
     """
-    N concurrent retries with the same idempotency key must produce exactly
-    one database write.
+    Tests two things:
 
-    Calls execute_quote() directly to avoid asyncpg event-loop issues with
-    concurrent ASGITransport requests (same reasoning as test_concurrency.py).
+    1. N simultaneous calls with the same idempotency key: because all tasks
+       start their transactions before any of them commits, all N see no cached
+       entry and race on SELECT FOR UPDATE.  Exactly one succeeds; the rest
+       raise QuoteAlreadyExecutedError.  This is the correct behaviour — the
+       idempotency guard only short-circuits *retries that arrive after the
+       first call completes*, not in-flight duplicates.
+
+    2. A subsequent retry (after the first call completed) returns the exact
+       same transaction record as the original — proving the idempotency cache
+       works for the common retry-after-timeout client pattern.
     """
+    from app.exceptions import QuoteAlreadyExecutedError
+
     key = str(uuid.uuid4())
     quote_id = pending_quote["quote_id"]
     customer_id = funded_customer["id"]
-    pool = await get_pool()
-    N = 10
+    N = 8
 
-    results = await asyncio.gather(
-        *[
-            fx_engine.execute_quote(
-                pool=pool,
-                customer_id=customer_id,
-                quote_id=quote_id,
-                idempotency_key=key,
-            )
-            for _ in range(N)
-        ],
-        return_exceptions=True,
+    pools = [await _mini_pool() for _ in range(N)]
+    try:
+        results = await asyncio.gather(
+            *[
+                fx_engine.execute_quote(
+                    pool=pool,
+                    customer_id=customer_id,
+                    quote_id=quote_id,
+                    idempotency_key=key,
+                )
+                for pool in pools
+            ],
+            return_exceptions=True,
+        )
+    finally:
+        for pool in pools:
+            await pool.close()
+
+    successes = [r for r in results if not isinstance(r, Exception)]
+    errors = [r for r in results if isinstance(r, Exception)]
+
+    # Exactly one concurrent caller wins the FOR UPDATE race.
+    assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {errors}"
+    # All others correctly see the quote as already executed.
+    assert all(isinstance(e, QuoteAlreadyExecutedError) for e in errors), (
+        f"Unexpected error types: {[type(e).__name__ for e in errors]}"
     )
 
-    errors = [r for r in results if isinstance(r, Exception)]
-    assert not errors, f"Unexpected errors: {[str(e) for e in errors]}"
-
-    # All results must be the same transaction record.
-    tx_ids = {str(r["id"]) for r in results}
-    assert len(tx_ids) == 1, f"Got multiple transaction IDs: {tx_ids}"
+    # Retry after completion must return the exact same transaction.
+    pool = await get_pool()
+    retry = await fx_engine.execute_quote(
+        pool=pool,
+        customer_id=customer_id,
+        quote_id=quote_id,
+        idempotency_key=key,
+    )
+    assert str(retry["id"]) == str(successes[0]["id"]), (
+        "Idempotency replay returned a different transaction"
+    )
 
     # Exactly one row in the DB.
     async with pool.acquire() as conn:

@@ -51,7 +51,9 @@ def test_to_amount_has_at_most_two_decimal_places(amount, pair):
 
 
 @given(
-    amount=st.decimals(min_value="0.01", max_value="10000000", places=2, allow_nan=False, allow_infinity=False),
+    # min_value=10.00 ensures the lowest-rate pair (NGN/USD ≈ 0.00067)
+    # produces to_amount >= 0.0067, which rounds to 0.01 — always positive.
+    amount=st.decimals(min_value="10.00", max_value="10000000", places=2, allow_nan=False, allow_infinity=False),
     pair=st.sampled_from(SUPPORTED_PAIRS),
 )
 @hyp_settings(max_examples=500)

@@ -5,20 +5,15 @@ from typing import Optional
 
 import asyncpg
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app import fx_engine
 from app.database import get_connection, get_pool
-from app.exceptions import FXError
 from app.rates import rate_provider
 from app.schemas import ExecuteRequest, QuoteRequest, QuoteResponse, TransactionResponse
 
 router = APIRouter(prefix="/quotes", tags=["quotes"])
 log = structlog.get_logger(__name__)
-
-
-def _fx_error_to_http(exc: FXError) -> HTTPException:
-    return HTTPException(status_code=exc.status_code, detail=str(exc))
 
 
 @router.post("", response_model=QuoteResponse, status_code=201)
@@ -29,17 +24,16 @@ async def create_quote(
     if body.from_currency == body.to_currency:
         raise HTTPException(status_code=400, detail="from_currency and to_currency must differ")
 
-    try:
-        row = await fx_engine.generate_quote(
-            conn=conn,
-            rate_provider=rate_provider,
-            customer_id=str(body.customer_id),
-            from_currency=body.from_currency,
-            to_currency=body.to_currency,
-            from_amount=body.amount,
-        )
-    except FXError as exc:
-        raise _fx_error_to_http(exc)
+    # FXError propagates to the app-level exception handler in main.py,
+    # which returns the structured {error, error_code, request_id} format.
+    row = await fx_engine.generate_quote(
+        conn=conn,
+        rate_provider=rate_provider,
+        customer_id=str(body.customer_id),
+        from_currency=body.from_currency,
+        to_currency=body.to_currency,
+        from_amount=body.amount,
+    )
 
     return {
         "quote_id": row["id"],
@@ -61,15 +55,12 @@ async def execute_quote(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     pool = await get_pool()
-    try:
-        tx = await fx_engine.execute_quote(
-            pool=pool,
-            customer_id=str(body.customer_id),
-            quote_id=quote_id,
-            idempotency_key=idempotency_key,
-        )
-    except FXError as exc:
-        raise _fx_error_to_http(exc)
+    tx = await fx_engine.execute_quote(
+        pool=pool,
+        customer_id=str(body.customer_id),
+        quote_id=quote_id,
+        idempotency_key=idempotency_key,
+    )
 
     return {
         "transaction_id": tx["id"],
