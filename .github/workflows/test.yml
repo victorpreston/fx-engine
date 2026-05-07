@@ -2,7 +2,7 @@ name: Test Suite
 
 on:
   push:
-    branches: [dev, staging]
+    branches: [dev, staging, fx-prod]
   workflow_dispatch:
 
 jobs:
@@ -54,7 +54,7 @@ jobs:
             --tb=short \
             -x
 
-      - name: Upload coverage to artifact
+      - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ github.sha }}
@@ -81,9 +81,10 @@ jobs:
         run: |
           for i in $(seq 1 30); do
             if curl -sf http://localhost:8000/healthz; then
-              echo "API is healthy"
+              echo "✅ API is healthy"
               break
             fi
+            echo "Waiting... ($i/30)"
             sleep 2
           done
 

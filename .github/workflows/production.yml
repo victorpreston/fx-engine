@@ -1,0 +1,191 @@
+name: Production — Full Pipeline
+
+on:
+  push:
+    branches: [fx-prod]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fx_engine
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fx_test
+          POSTGRES_PASSWORD: fx_test_secret
+          POSTGRES_DB: fx_test_db
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U fx_test -d fx_test_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full test suite
+        env:
+          TEST_DATABASE_URL: postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db
+          DATABASE_URL: postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db
+          RATE_STALE_SECONDS: "3600"
+          ENVIRONMENT: production
+        run: |
+          pytest -v \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --tb=short \
+            -x
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-coverage-${{ github.sha }}
+          path: fx_engine/coverage.xml
+
+  docker-build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: |
+          docker build \
+            -t fx-engine:${{ github.sha }} \
+            -t fx-engine:latest \
+            fx_engine/
+
+      - name: Verify image starts
+        run: |
+          docker run --rm -d \
+            --name fx-engine-verify \
+            -e DATABASE_URL=postgresql://x:x@localhost/x \
+            -e RATE_STALE_SECONDS=3600 \
+            fx-engine:${{ github.sha }} \
+            uvicorn app.main:app --host 0.0.0.0 --port 8000 || true
+          echo "Image build verified"
+
+  smoke-test:
+    name: End-to-End Smoke Test
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start full stack
+        run: docker compose -f fx_engine/docker-compose.yml up -d --build
+
+      - name: Wait for API to be healthy
+        run: |
+          echo "Waiting for API..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/healthz > /dev/null 2>&1; then
+              echo "✅ API healthy after ${i} attempts"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run end-to-end smoke tests
+        run: |
+          set -e
+
+          echo "--- /healthz ---"
+          curl -sf http://localhost:8000/healthz | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert d['status'] in ('ok', 'degraded'), f'Bad health: {d}'
+          assert 'database' in d['components']
+          assert 'rates' in d['components']
+          print('healthz OK:', d['status'])
+          "
+
+          echo "--- /rates ---"
+          curl -sf http://localhost:8000/rates | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert 'pairs' in d, f'Missing pairs: {d}'
+          assert len(d['pairs']) == 12, f'Expected 12 pairs, got {len(d[\"pairs\"])}'
+          print('rates OK: 12 pairs loaded')
+          "
+
+          echo "--- /metrics ---"
+          curl -sf http://localhost:8000/metrics | grep -q 'fx_quotes_created_total'
+          echo "metrics OK: Prometheus counters present"
+
+          echo "--- customer + quote + execute flow ---"
+          CUSTOMER=$(curl -sf -X POST http://localhost:8000/customers \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"Smoke Test User","email":"smoke@test.prod"}')
+          CID=$(echo $CUSTOMER | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Customer created: $CID"
+
+          curl -sf -X POST http://localhost:8000/customers/$CID/balances/credit \
+            -H 'Content-Type: application/json' \
+            -d '{"currency":"USD","amount":"500.00"}' > /dev/null
+          echo "Balance credited: 500 USD"
+
+          QUOTE=$(curl -sf -X POST http://localhost:8000/quotes \
+            -H 'Content-Type: application/json' \
+            -d "{\"customer_id\":\"$CID\",\"from_currency\":\"USD\",\"to_currency\":\"KES\",\"amount\":\"100.00\"}")
+          QID=$(echo $QUOTE | python3 -c "import sys,json; print(json.load(sys.stdin)['quote_id'])")
+          echo "Quote created: $QID"
+
+          TX=$(curl -sf -X POST http://localhost:8000/quotes/$QID/execute \
+            -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: smoke-test-$(date +%s)" \
+            -d "{\"customer_id\":\"$CID\"}")
+          echo "Transaction: $(echo $TX | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['status'], d['from_currency'], '->', d['to_currency'])")"
+
+          echo "✅ Full flow verified"
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f fx_engine/docker-compose.yml down -v
+
+  production-summary:
+    name: Production Deploy Summary
+    runs-on: ubuntu-latest
+    needs: [test, docker-build, smoke-test]
+    if: always()
+
+    steps:
+      - name: Report status
+        run: |
+          echo "=============================="
+          echo "  FX Engine — Production Build"
+          echo "=============================="
+          echo "Commit : ${{ github.sha }}"
+          echo "Branch : ${{ github.ref_name }}"
+          echo "Tests  : ${{ needs.test.result }}"
+          echo "Docker : ${{ needs.docker-build.result }}"
+          echo "Smoke  : ${{ needs.smoke-test.result }}"
+          echo "=============================="
+          if [[ "${{ needs.test.result }}" != "success" || \
+                "${{ needs.docker-build.result }}" != "success" || \
+                "${{ needs.smoke-test.result }}" != "success" ]]; then
+            echo "FAILED — production pipeline did not complete cleanly"
+            exit 1
+          fi
+          echo "✅ Production pipeline passed"
