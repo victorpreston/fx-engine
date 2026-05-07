@@ -1,0 +1,99 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [dev, staging]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Full Test Suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fx_engine
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fx_test
+          POSTGRES_PASSWORD: fx_test_secret
+          POSTGRES_DB: fx_test_db
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U fx_test -d fx_test_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run full test suite
+        env:
+          TEST_DATABASE_URL: postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db
+          DATABASE_URL: postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db
+          RATE_STALE_SECONDS: "3600"
+          ENVIRONMENT: test
+        run: |
+          pytest -v \
+            --cov=app \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --tb=short \
+            -x
+
+      - name: Upload coverage to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: fx_engine/coverage.xml
+
+      - name: Concurrency test summary
+        if: always()
+        run: |
+          echo "=== Concurrency Test Results ==="
+          pytest tests/test_concurrency.py -v --no-header 2>&1 || true
+
+  integration-smoke:
+    name: Docker Compose Smoke Test
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start services
+        run: docker compose -f fx_engine/docker-compose.yml up -d --build
+
+      - name: Wait for API to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/healthz; then
+              echo "API is healthy"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Smoke test endpoints
+        run: |
+          curl -sf http://localhost:8000/healthz | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['status'] in ('ok','degraded'), d"
+          curl -sf http://localhost:8000/rates | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'pairs' in d, d"
+          curl -sf http://localhost:8000/metrics | grep -q 'fx_quotes_created_total'
+          echo "All smoke tests passed"
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f fx_engine/docker-compose.yml down -v

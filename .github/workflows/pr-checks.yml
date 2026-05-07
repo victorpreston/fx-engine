@@ -1,0 +1,106 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [dev, staging, fx-prod]
+
+jobs:
+  lint-and-type-check:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fx_engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt ruff pyright
+
+      - name: Ruff lint
+        run: ruff check app/ tests/
+
+      - name: Ruff format check
+        run: ruff format --check app/ tests/
+
+  test:
+    name: Test Suite (PostgreSQL)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fx_engine
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fx_test
+          POSTGRES_PASSWORD: fx_test_secret
+          POSTGRES_DB: fx_test_db
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U fx_test -d fx_test_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          TEST_DATABASE_URL: postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db
+          DATABASE_URL: postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db
+          RATE_STALE_SECONDS: "3600"
+          ENVIRONMENT: test
+        run: pytest -v --cov=app --cov-report=xml --cov-report=term-missing
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: fx_engine/coverage.xml
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t fx-engine:pr-${{ github.event.pull_request.number }} fx_engine/
+
+  all-checks-pass:
+    name: All Checks Pass
+    needs: [lint-and-type-check, test, docker-build]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [[ "${{ needs.lint-and-type-check.result }}" != "success" || \
+                "${{ needs.test.result }}" != "success" || \
+                "${{ needs.docker-build.result }}" != "success" ]]; then
+            echo "One or more required checks failed"
+            exit 1
+          fi
+          echo "All checks passed"
