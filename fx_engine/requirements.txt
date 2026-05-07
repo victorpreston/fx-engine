@@ -1,0 +1,17 @@
+# Runtime
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+asyncpg==0.30.0
+httpx==0.28.1
+structlog==24.4.0
+prometheus-client==0.21.1
+pydantic[email]==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# Testing
+hypothesis==6.122.3
+pytest==8.3.4
+pytest-asyncio==0.25.2
+pytest-cov==6.0.0
+anyio[trio]==4.7.0

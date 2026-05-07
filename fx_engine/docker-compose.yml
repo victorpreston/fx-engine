@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fx
+      POSTGRES_PASSWORD: fx_secret
+      POSTGRES_DB: fx_db
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fx -d fx_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://fx:fx_secret@db:5432/fx_db
+      RATE_API_URL: https://api.exchangerate-api.com/v4/latest
+      RATE_STALE_SECONDS: "600"
+      RATE_REFRESH_INTERVAL_SECONDS: "300"
+      QUOTE_TTL_SECONDS: "60"
+      LOG_LEVEL: INFO
+      ENVIRONMENT: production
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
