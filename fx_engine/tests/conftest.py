@@ -36,7 +36,7 @@ from app.rates import rate_provider, _FALLBACK_MID, _compute_all_mids  # noqa: E
 
 # ── DB-level fixtures ─────────────────────────────────────────────────────────
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
+@pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
 async def db_schema():
     """Create schema once per test session."""
     pool = await get_pool()
