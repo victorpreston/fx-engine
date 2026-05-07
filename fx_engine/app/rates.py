@@ -35,9 +35,9 @@ DEFAULT_SPREAD = Decimal("0.005")
 
 # Fallback mid-rates used when the live API is unreachable at startup.
 _FALLBACK_MID: dict[str, Decimal] = {
-    "USD/EUR": Decimal("0.9200"),
-    "USD/KES": Decimal("129.50"),
-    "USD/NGN": Decimal("1480.00"),
+    "EUR": Decimal("0.9200"),
+    "KES": Decimal("129.50"),
+    "NGN": Decimal("1480.00"),
 }
 
 SUPPORTED_CURRENCIES = {"USD", "EUR", "KES", "NGN"}
