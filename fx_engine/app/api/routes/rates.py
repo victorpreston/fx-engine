@@ -3,8 +3,8 @@ from __future__ import annotations
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from app.rates import rate_provider
-from app.schemas import RatesResponse, RatePairDetail, RefreshResponse
+from app.core.schemas import RatePairDetail, RatesResponse, RefreshResponse
+from app.services.rates import rate_provider
 
 router = APIRouter(prefix="/rates", tags=["rates"])
 log = structlog.get_logger(__name__)
@@ -27,10 +27,7 @@ async def refresh_rates():
         await rate_provider.refresh()
     except Exception as exc:
         log.warning("manual rate refresh failed", error=str(exc))
-        raise HTTPException(
-            status_code=503,
-            detail=f"Rate refresh failed: {exc}",
-        )
+        raise HTTPException(status_code=503, detail=f"Rate refresh failed: {exc}")
 
     snap = rate_provider.snapshot()
     return {

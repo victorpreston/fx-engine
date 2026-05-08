@@ -6,14 +6,14 @@ import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.database import get_connection
-from app.schemas import (
-    BalancesResponse,
+from app.core.schemas import (
     BalanceItem,
+    BalancesResponse,
     CreditRequest,
     CustomerCreate,
     CustomerResponse,
 )
+from app.services.database import get_connection
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 log = structlog.get_logger(__name__)
@@ -85,8 +85,9 @@ async def credit_balance(
     conn: asyncpg.Connection = Depends(get_connection),
 ):
     """
-    Test fixture — manually credit a customer's balance.
-    Not exposed in production; exists to bootstrap test scenarios.
+    Credit a customer's balance in a given currency.
+    Intended as an internal funding endpoint; in production this should
+    be protected behind authentication or restricted to internal networks.
     """
     customer = await conn.fetchrow(
         "SELECT id FROM customers WHERE id = $1", customer_id

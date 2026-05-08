@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
-from app.rates import RateProvider, _FALLBACK_MID, _compute_all_mids
+from app.core.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
+from app.services.rates import _FALLBACK_MID, RateProvider, _compute_all_mids
 
 
 @pytest.fixture
@@ -108,7 +108,7 @@ async def test_refresh_failure_preserves_existing_rates(provider):
 
 
 def test_all_12_pairs_covered():
-    from app.rates import SUPPORTED_CURRENCIES
+    from app.services.rates import SUPPORTED_CURRENCIES
 
     currencies = list(SUPPORTED_CURRENCIES)
     mids = _compute_all_mids(_FALLBACK_MID)

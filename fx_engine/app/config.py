@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql://fx:fx_secret@localhost:5432/fx_db"
+    redis_url: str = "redis://localhost:6379/0"
+    rabbitmq_url: str = "amqp://fx:fx_secret@localhost:5672/"
     rate_api_url: str = "https://api.exchangerate-api.com/v4/latest"
     rate_stale_seconds: int = 600
     rate_refresh_interval_seconds: int = 300

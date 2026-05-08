@@ -41,6 +41,7 @@ async def test_execute_debits_source_and_credits_destination(
 async def test_execute_fails_on_expired_quote(client, funded_customer, monkeypatch):
     """A quote whose TTL has passed must be rejected."""
     from datetime import datetime, timedelta, timezone
+
     from app.config import settings
 
     resp = await client.post(
@@ -59,7 +60,7 @@ async def test_execute_fails_on_expired_quote(client, funded_customer, monkeypat
     future = datetime.now(timezone.utc) + timedelta(
         seconds=settings.quote_ttl_seconds + 5
     )
-    import app.fx_engine as fx_module
+    import app.core.engine as fx_module
 
     class FakeDatetime(datetime):
         @classmethod
@@ -187,7 +188,7 @@ async def test_execute_atomicity_second_leg_negative_balance_rolls_back(
     assert quote_resp.status_code == 201
 
     # Drain the USD balance so execute fails.
-    pool = await __import__("app.database", fromlist=["get_pool"]).get_pool()
+    pool = await __import__("app.services.database", fromlist=["get_pool"]).get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE balances SET amount = 0 WHERE customer_id = $1 AND currency = 'USD'",

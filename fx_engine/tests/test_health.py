@@ -20,8 +20,8 @@ async def test_healthz_database_component_ok(client):
 
 
 async def test_healthz_rates_stale_shows_degraded(client, monkeypatch):
-    from app.rates import rate_provider
     from app.config import settings
+    from app.services.rates import rate_provider
 
     monkeypatch.setattr(
         rate_provider,

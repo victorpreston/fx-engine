@@ -18,7 +18,7 @@ async def get_pool() -> asyncpg.Pool:
             min_size=5,
             max_size=20,
             command_timeout=30,
-            init=_set_type_codecs,
+            init=set_type_codecs,
         )
     return _pool
 
@@ -32,7 +32,9 @@ async def close_pool() -> None:
 
 async def run_migrations(pool: asyncpg.Pool | None = None) -> None:
     p = pool or await get_pool()
-    sql = (Path(__file__).parent.parent / "migrations" / "001_initial.sql").read_text()
+    sql = (
+        Path(__file__).parent.parent.parent / "migrations" / "001_initial.sql"
+    ).read_text()
     async with p.acquire() as conn:
         await conn.execute(sql)
 
@@ -46,10 +48,6 @@ async def set_type_codecs(conn: asyncpg.Connection) -> None:
         schema="pg_catalog",
         format="text",
     )
-
-
-# Keep the private alias so existing internal callers still work.
-_set_type_codecs = set_type_codecs
 
 
 async def get_connection() -> AsyncGenerator[asyncpg.Connection, None]:

@@ -7,10 +7,15 @@ import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app import fx_engine
-from app.database import get_connection, get_pool
-from app.rates import rate_provider
-from app.schemas import ExecuteRequest, QuoteRequest, QuoteResponse, TransactionResponse
+from app.core import engine
+from app.core.schemas import (
+    ExecuteRequest,
+    QuoteRequest,
+    QuoteResponse,
+    TransactionResponse,
+)
+from app.services.database import get_connection, get_pool
+from app.services.rates import rate_provider
 
 router = APIRouter(prefix="/quotes", tags=["quotes"])
 log = structlog.get_logger(__name__)
@@ -26,9 +31,7 @@ async def create_quote(
             status_code=400, detail="from_currency and to_currency must differ"
         )
 
-    # FXError propagates to the app-level exception handler in main.py,
-    # which returns the structured {error, error_code, request_id} format.
-    row = await fx_engine.generate_quote(
+    row = await engine.generate_quote(
         conn=conn,
         rate_provider=rate_provider,
         customer_id=str(body.customer_id),
@@ -57,7 +60,7 @@ async def execute_quote(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     pool = await get_pool()
-    tx = await fx_engine.execute_quote(
+    tx = await engine.execute_quote(
         pool=pool,
         customer_id=str(body.customer_id),
         quote_id=quote_id,

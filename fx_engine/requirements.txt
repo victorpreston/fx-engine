@@ -8,6 +8,8 @@ prometheus-client==0.21.1
 pydantic[email]==2.10.3
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
+redis[asyncio]==5.2.1
+aio-pika==9.5.4
 
 # Testing
 hypothesis==6.122.3

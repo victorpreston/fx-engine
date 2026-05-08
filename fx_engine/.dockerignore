@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# Tests and coverage
+tests/
+.pytest_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+
+# Docs and project files
+*.md
+SPEC.md
+DECISIONS.md
+AGENTS.md
+REVIEW.md
+
+# Docker compose files (not needed inside the image)
+docker-compose*.yml
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Ruff cache
+.ruff_cache/

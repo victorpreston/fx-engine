@@ -7,7 +7,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-
 SUPPORTED_CURRENCIES = {"USD", "EUR", "KES", "NGN"}
 
 

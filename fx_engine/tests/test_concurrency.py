@@ -25,10 +25,10 @@ from decimal import Decimal
 
 import asyncpg
 
-from app import fx_engine
 from app.config import settings
-from app.database import set_type_codecs
-from app.exceptions import QuoteAlreadyExecutedError
+from app.core import engine
+from app.core.exceptions import QuoteAlreadyExecutedError
+from app.services.database import set_type_codecs
 
 
 async def _mini_pool() -> asyncpg.Pool:
@@ -59,7 +59,7 @@ async def test_concurrent_execute_only_one_succeeds(funded_customer, pending_quo
     try:
         results = await asyncio.gather(
             *[
-                fx_engine.execute_quote(
+                engine.execute_quote(
                     pool=pool,
                     customer_id=customer_id,
                     quote_id=quote_id,
@@ -85,7 +85,7 @@ async def test_concurrent_execute_only_one_succeeds(funded_customer, pending_quo
     )
 
     # Exactly one transaction row in the database.
-    from app.database import get_pool
+    from app.services.database import get_pool
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -121,7 +121,7 @@ async def test_concurrent_execute_balance_debited_exactly_once(client, funded_cu
     try:
         await asyncio.gather(
             *[
-                fx_engine.execute_quote(
+                engine.execute_quote(
                     pool=pool,
                     customer_id=funded_customer["id"],
                     quote_id=quote_id,
@@ -185,10 +185,10 @@ async def test_different_quotes_execute_concurrently_no_deadlock(
     p1, p2 = await _mini_pool(), await _mini_pool()
     try:
         r1, r2 = await asyncio.gather(
-            fx_engine.execute_quote(
+            engine.execute_quote(
                 pool=p1, customer_id=funded_customer["id"], quote_id=q1["quote_id"]
             ),
-            fx_engine.execute_quote(
+            engine.execute_quote(
                 pool=p2, customer_id=funded_customer["id"], quote_id=q2["quote_id"]
             ),
             return_exceptions=True,
