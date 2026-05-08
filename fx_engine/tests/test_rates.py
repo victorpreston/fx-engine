@@ -81,7 +81,7 @@ async def test_refresh_updates_rates_and_timestamp(provider):
     mock_response = MagicMock()
     mock_response.raise_for_status = MagicMock()
     mock_response.json.return_value = {
-        "rates": {"EUR": 0.91, "KES": 130.5, "NGN": 1490.0}
+        "conversion_rates": {"EUR": 0.91, "KES": 130.5, "NGN": 1490.0}
     }
     mock_client = AsyncMock()
     mock_client.get.return_value = mock_response

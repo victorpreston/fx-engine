@@ -26,14 +26,24 @@
 
 
 ### Three Migrations — Rationale for Each
-**001 initial_schema:** Full schema in one migration. It was the only migration at the time and there was nothing to separate it from.  
-**002 compound_indexes:** Separated from the initial schema deliberately — indexes are tuning decisions, not structural decisions. Separating them makes it easy to see when index strategy changed and to roll back index changes without touching table definitions. The composite indexes chosen:
-- `quotes(customer_id, status, created_at DESC)` — covers "show me this customer's pending quotes, newest first" — the primary dashboard query pattern.
-- `transactions(customer_id, executed_at DESC)` — covers account statement queries.
-- `idx_quotes_status_expires` from the initial schema — covers the background expired-quote cleanup query.  
 
-The original single-column `idx_quotes_customer` was dropped — it's subsumed by the composite index and would just waste write overhead.  
-**003 customer enrichment + quote audit fields:** Schema changes that reflect product decisions, kept separate from structural (001) and tuning (002) changes. `phone` and `country` on customers are Umba-specific — Kenya is M-Pesa driven, country is required for regulatory reporting. `kyc_status` is a first-class financial compliance concept. `reference` on quotes is a standard payments pattern (client reconciliation ref). `mid_rate` on quotes enables auditing the exact spread applied to any historical quote.
+**`be56cd133310` — initial_schema**  
+All tables in one migration: `customers`, `balances`, `quotes`, `transactions`, `rate_snapshots`. Indexes created here: `idx_quotes_customer` (single-column — later replaced), `idx_quotes_status_expires` (for expired-quote background cleanup), `idx_transactions_idempotency` (partial unique), `idx_transactions_customer`, `idx_rate_snapshots_pair_time`.
+
+**`1076c0e1bb3f` — compound_indexes**  
+Separated from the initial schema intentionally — indexes are a tuning decision, not a structural one. Rolling back index strategy should never touch table definitions. Changes in this revision:
+- Drops `idx_quotes_customer` (single-column, subsumed by the composite — keeping it wastes write overhead on every quote insert)
+- Creates `idx_quotes_customer_status_created ON quotes(customer_id, status, created_at DESC)` — matches the "show me this customer's pending quotes, newest first" dashboard query pattern exactly
+- Creates `idx_transactions_customer_date ON transactions(customer_id, executed_at DESC)` — matches the account statement query pattern
+
+**`aadaaac35570` — customer_enrichment_and_quote_audit_fields**  
+Product decisions reflected as schema changes, kept separate from structural (first migration) and tuning (second) changes:
+- `customers.phone` — primary contact channel for M-Pesa notifications; Kenya is phone-first
+- `customers.country CHAR(2)` — ISO 3166-1 alpha-2; required for regulatory reporting and future per-country spread tiers
+- `customers.kyc_status CHECK (pending/verified/rejected) DEFAULT pending` — legally required before FX execution in production; constraint lives in the DB from day one even before enforcement is added at the application layer
+- `quotes.reference` — client-provided reconciliation reference (e.g. INV-2026-001); stored verbatim
+- `quotes.mid_rate NUMERIC(20,8)` — market mid-rate at quote time; combined with the stored effective rate proves the exact spread applied, essential for dispute resolution
+- `idx_customers_country` partial index (`WHERE country IS NOT NULL`) — placed here, not in the previous migration, because the column doesn't exist until this revision runs
 
 ### Rate Computation Strategy
 **Decision (mine):** Pre-compute all 12 A/B pairs at refresh time from three USD-base rates; no runtime routing.  
@@ -120,13 +130,32 @@ The original single-column `idx_quotes_customer` was dropped — it's subsumed b
 
 ---
 
+## One Thing the AI Got Wrong
+
+The first draft of `execute_quote` placed the idempotency key lookup **outside** the database transaction — before `async with conn.transaction():` opened.
+
+The consequence: two concurrent retries with the same key both execute the `SELECT FROM transactions WHERE idempotency_key = $1` check, both find nothing, both fall through to execution. One commits. The other hits the UNIQUE constraint on `idempotency_key` and returns a 500 — not a clean idempotent replay, a server error on a client retry. That is the exact opposite of what idempotency is supposed to guarantee.
+
+I caught it by reading the function top-to-bottom before committing and cross-referencing it against the idempotency constraint in my spec. The fix was moving the key lookup to be the first statement *inside* `async with conn.transaction():`, before the `SELECT ... FOR UPDATE` lock on the quote row. Inside the transaction, the lookup and the eventual insert are serialised — a second concurrent caller either finds the cached row and short-circuits, or waits behind the row lock and then also finds it.
+
+This class of bug — a check-then-act race where the check and the act are in different transaction scopes — is structurally identical to bugs 1 and 5 in `planted_bugs/`. LLMs reproduce common code patterns, and common patterns in financial systems contain exactly these races.
+
+---
+
 ## What I'd Do with Another Day
 
-1. **Rate persistence** — write each refresh's rates to `rate_snapshots` and allow quote generation to reference the snapshot ID, enabling full rate audit trails.
-2. **Webhook notifications** — `POST` to a customer-configured URL when a quote is executed.
-3. **Quote streaming** — SSE endpoint streaming live rate updates so client UIs don't need to poll.
-4. **Per-customer spread tiers** — premium customers get tighter spreads based on `tier` column on the customer table.
-5. **Kubernetes manifests** — HPA, PodDisruptionBudget, readiness/liveness probes using `/healthz`.
-6. **OpenTelemetry traces** — span the full quote → execute flow with the `trace_id` carried through.
-7. **`dev.yml` and `staging.yml` GitHub Actions** — dedicated CI workflows for each environment in the promotion chain (dev: lint + tests; staging: tests + Docker build; production: full E2E pipeline).
-8. **KYC enforcement on execute** — reject execute if `kyc_status != 'verified'` once authentication is in place.
+1. **Outbox pattern for guaranteed event delivery** — currently events are fire-and-forget after commit; a broker outage silently drops them. The fix: write events to an `outbox` table inside the same database transaction as the execute, then relay to RabbitMQ via a separate background process. This is the only way to guarantee exactly-once delivery without distributed transactions.
+
+2. **Balance reservation on quote generation** — currently a customer can generate 10 quotes for 1,000 USD while only holding 1,000 USD. The first execute succeeds, the rest fail with `insufficient_balance`. A better model: reserve `from_amount` against the customer's balance at quote time, release on expiry or execute. This makes the quote a true commitment from both sides.
+
+3. **Quote expiry background worker** — quotes currently transition to `expired` only when a client attempts to execute them. A background sweep should proactively mark expired quotes, enabling accurate reporting (`expired` vs `abandoned`) and releasing balance reservations on time.
+
+4. **Reverse quote** — "how much USD do I need to send to receive exactly 50,000 KES?" Currently the API only accepts `from_amount`. A reverse quote accepts `to_amount` and back-calculates `from_amount = to_amount / rate`, including the spread. Essential for remittance flows where the recipient amount is fixed.
+
+5. **Transaction history endpoint** — `GET /customers/{id}/transactions` with cursor-based pagination and date range filtering. The `transactions` table exists; the endpoint does not. Required for account statements and customer-facing reconciliation.
+
+6. **Per-customer FX limits** — a `daily_limit_usd` column on the `customers` table, checked inside `execute_quote` before debiting. Microfinance regulation (including CBK guidelines) requires transaction limits per customer tier. This is a one-line schema change and a single balance-check addition to the execute path.
+
+7. **KYC enforcement on execute** — reject execute if `kyc_status != 'verified'`. The field, constraint, and update endpoint already exist. Enforcement requires an authentication layer to identify the caller — first step once auth is introduced.
+
+8. **Per-customer spread tiers** — a `tier` column (`standard`, `premium`) on customers. Premium customers get tighter spreads (e.g. 0.15% on USD/EUR instead of 0.30%). The `get_effective_rate()` function accepts a spread parameter — wiring in customer tier is a small change with direct revenue impact.

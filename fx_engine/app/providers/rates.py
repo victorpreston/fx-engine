@@ -179,10 +179,13 @@ class RateProvider:
         async with self._lock:
             if self._http is None:
                 raise RuntimeError("RateProvider.start() must be called before refresh")
-            resp = await self._http.get(f"{settings.rate_api_url}/USD")
+            # v6 endpoint: /v6/{API_KEY}/latest/{base}
+            url = f"{settings.rate_api_url}/{settings.rate_api_key}/latest/USD"
+            resp = await self._http.get(url)
             resp.raise_for_status()
             data = resp.json()
-            raw = data.get("rates", data)
+            # v6 response uses "conversion_rates"; fall back for test mocks
+            raw = data.get("conversion_rates", data.get("rates", data))
 
             usd_rates = {
                 "EUR": Decimal(str(raw["EUR"])),

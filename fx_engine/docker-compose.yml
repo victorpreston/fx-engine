@@ -56,7 +56,8 @@ services:
       DATABASE_URL: postgresql://fx:fx_secret@db:5432/fx_db
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://fx:fx_secret@rabbitmq:5672/
-      RATE_API_URL: https://api.exchangerate-api.com/v4/latest
+      RATE_API_URL: https://v6.exchangerate-api.com/v6
+      RATE_API_KEY: ${RATE_API_KEY}
       RATE_STALE_SECONDS: "600"
       RATE_REFRESH_INTERVAL_SECONDS: "300"
       QUOTE_TTL_SECONDS: "60"

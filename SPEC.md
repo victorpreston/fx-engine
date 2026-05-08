@@ -66,6 +66,22 @@ All 12 A/B pairs are computed directly (not routed at query time). There is no r
 
 ---
 
+## Customers
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | UUID | Unique customer identifier |
+| `name` | TEXT | Full name |
+| `email` | TEXT | Unique email address |
+| `phone` | TEXT | E.164 phone number (e.g. `+254712345678`), optional |
+| `country` | CHAR(2) | ISO 3166-1 alpha-2 country code (e.g. `KE`), optional |
+| `kyc_status` | enum | `pending`, `verified`, `rejected` — defaults to `pending` |
+| `created_at` | TIMESTAMPTZ | Account creation timestamp |
+
+KYC enforcement on execute is **out of scope** for this submission (no auth layer). The field and constraint exist in the database; enforcement is the next step once authentication is introduced.
+
+---
+
 ## Quotes
 
 | Field | Type | Description |
@@ -76,7 +92,9 @@ All 12 A/B pairs are computed directly (not routed at query time). There is no r
 | `to_currency` | CHAR(3) | Destination currency |
 | `from_amount` | Decimal | Amount customer sends |
 | `to_amount` | Decimal | Amount customer receives (locked, 2dp) |
-| `rate` | Decimal | Effective rate (to_amount / from_amount) |
+| `rate` | Decimal | Effective rate after spread (to_amount / from_amount) |
+| `mid_rate` | Decimal | Market mid-rate at quote time — combined with `rate` proves the exact spread applied; essential for audit and dispute resolution |
+| `reference` | TEXT | Optional client-provided reference for reconciliation (e.g. `INV-2026-001`) |
 | `expires_at` | TIMESTAMPTZ | 60 seconds from creation |
 | `status` | enum | `pending`, `executed`, `expired`, `failed` |
 
@@ -126,7 +144,7 @@ Balance rows are locked in ascending alphabetical order by currency code (`EUR` 
 
 | Aspect | Policy |
 |--------|--------|
-| Primary source | `api.exchangerate-api.com` free tier (USD base) |
+| Primary source | `v6.exchangerate-api.com` — v6 API with provided key, USD base (`/v6/{key}/latest/USD`) |
 | Fallback | Last successfully fetched rates |
 | Staleness threshold | 10 minutes |
 | Behaviour past threshold | New quote requests return HTTP 503; existing quotes may still be executed if they were generated before the threshold |
@@ -140,14 +158,15 @@ Balance rows are locked in ascending alphabetical order by currency code (`EUR` 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/customers` | Create customer |
+| POST | `/customers` | Create customer (accepts `phone`, `country`) |
 | GET | `/customers/{id}` | Get customer |
+| PATCH | `/customers/{id}/kyc` | Update KYC status (`pending`/`verified`/`rejected`) |
 | GET | `/customers/{id}/balances` | List all currency balances |
-| POST | `/customers/{id}/balances/credit` | Test fixture: credit a balance |
-| POST | `/quotes` | Generate FX quote |
-| POST | `/quotes/{id}/execute` | Execute quote (atomic) |
-| GET | `/rates` | Current rates with buy/sell/mid |
-| POST | `/rates/refresh` | Force rate refresh |
+| POST | `/customers/{id}/balances/credit` | Internal fixture: credit a balance |
+| POST | `/quotes` | Generate FX quote (accepts optional `reference`) |
+| POST | `/quotes/{id}/execute` | Execute quote atomically |
+| GET | `/rates` | Current rates with buy/sell/mid for all 12 pairs |
+| POST | `/rates/refresh` | Force rate refresh from upstream API |
 | GET | `/healthz` | DB + rates health check |
 | GET | `/metrics` | Prometheus-format metrics |
 
@@ -172,7 +191,7 @@ All error responses include `request_id` for log correlation.
 
 - **Structured JSON logs** (structlog) — every log record includes `request_id`, `method`, `path`, `status_code`, `duration_ms`.
 - **X-Request-ID** — attached to every response; propagated from client header if provided.
-- **Prometheus metrics** at `/metrics`: `fx_quotes_created_total`, `fx_quotes_executed_total`, `fx_quotes_expired_total`, `fx_quote_errors_total{error_code}`, `fx_rate_fetch_success_total`, `fx_rate_fetch_failure_total`, `fx_rates_stale`.
+- **Prometheus metrics** at `/metrics`: `fx_quotes_created_total`, `fx_quotes_executed_total`, `fx_quotes_expired_total`, `fx_quote_errors_total{error_code}`, `fx_rate_fetch_success_total`, `fx_rate_fetch_failure_total`, `fx_rates_stale`, `fx_http_request_duration_seconds` (histogram with P50/P95/P99 buckets).
 - **`/healthz`** — returns `ok`, `degraded` (stale rates), or `unhealthy` (DB unreachable).
 
 ---

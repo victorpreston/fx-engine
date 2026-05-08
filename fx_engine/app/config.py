@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://fx:fx_secret@localhost:5432/fx_db"
     redis_url: str = "redis://localhost:6379/0"
     rabbitmq_url: str = "amqp://fx:fx_secret@localhost:5672/"
-    rate_api_url: str = "https://api.exchangerate-api.com/v4/latest"
+    rate_api_url: str = "https://v6.exchangerate-api.com/v6"
+    rate_api_key: str = ""
     rate_stale_seconds: int = 600
     rate_refresh_interval_seconds: int = 300
     quote_ttl_seconds: int = 60
