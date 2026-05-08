@@ -3,8 +3,8 @@ from __future__ import annotations
 import structlog
 from fastapi import APIRouter, HTTPException
 
-from app.core.schemas import RatePairDetail, RatesResponse, RefreshResponse
-from app.services.rates import rate_provider
+from app.models.shared import RatePairDetail, RatesResponse, RefreshResponse
+from app.providers.rates import rate_provider
 
 router = APIRouter(prefix="/rates", tags=["rates"])
 log = structlog.get_logger(__name__)

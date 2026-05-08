@@ -17,7 +17,7 @@ from hypothesis import assume, given
 from hypothesis import settings as hyp_settings
 from hypothesis import strategies as st
 
-from app.services.rates import (
+from app.providers.rates import (
     _FALLBACK_MID,
     DEFAULT_SPREAD,
     PAIR_SPREADS,

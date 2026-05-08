@@ -43,7 +43,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 import app.services.database as _db_module  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.main import app  # noqa: E402
-from app.services.rates import (  # noqa: E402
+from app.providers.rates import (  # noqa: E402
     _FALLBACK_MID,
     _compute_all_mids,
     rate_provider,

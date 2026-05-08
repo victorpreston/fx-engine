@@ -15,7 +15,7 @@ from decimal import Decimal
 import asyncpg
 
 from app.config import settings
-from app.core import engine
+from app.engine import fx
 from app.services.database import get_pool, set_type_codecs
 
 
@@ -138,7 +138,7 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
        same transaction record as the original — proving the idempotency cache
        works for the common retry-after-timeout client pattern.
     """
-    from app.core.exceptions import QuoteAlreadyExecutedError
+    from app.exceptions import QuoteAlreadyExecutedError
 
     key = str(uuid.uuid4())
     quote_id = pending_quote["quote_id"]
@@ -149,7 +149,7 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
     try:
         results = await asyncio.gather(
             *[
-                engine.execute_quote(
+                fx.execute_quote(
                     pool=pool,
                     customer_id=customer_id,
                     quote_id=quote_id,
@@ -175,7 +175,7 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
 
     # Retry after completion must return the exact same transaction.
     pool = await get_pool()
-    retry = await engine.execute_quote(
+    retry = await fx.execute_quote(
         pool=pool,
         customer_id=customer_id,
         quote_id=quote_id,

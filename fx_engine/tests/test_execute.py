@@ -60,7 +60,7 @@ async def test_execute_fails_on_expired_quote(client, funded_customer, monkeypat
     future = datetime.now(timezone.utc) + timedelta(
         seconds=settings.quote_ttl_seconds + 5
     )
-    import app.core.engine as fx_module
+    import app.engine.fx as fx_module
 
     class FakeDatetime(datetime):
         @classmethod

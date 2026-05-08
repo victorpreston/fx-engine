@@ -6,7 +6,7 @@ import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.core.schemas import (
+from app.models.customer import (
     BalanceItem,
     BalancesResponse,
     CreditRequest,

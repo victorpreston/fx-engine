@@ -11,7 +11,7 @@ import httpx
 import structlog
 
 from app.config import settings
-from app.core.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
+from app.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
 from app.services.metrics import rate_fetch_failure, rate_fetch_success
 
 log = structlog.get_logger(__name__)

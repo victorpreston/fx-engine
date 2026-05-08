@@ -20,15 +20,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.api.routes import customers, health, quotes
-from app.api.routes import rates as rates_router
 from app.config import settings
-from app.core.exceptions import FXError
+from app.exceptions import FXError
+from app.providers.rates import rate_provider
+from app.routes import customers, health, quotes
+from app.routes import rates as rates_router
 from app.services.cache import close_redis, get_redis
 from app.services.database import close_pool, get_pool
 from app.services.events import close_events, connect_events
 from app.services.metrics import quote_errors, request_duration
-from app.services.rates import rate_provider
 
 # ── Structured logging ────────────────────────────────────────────────────────
 structlog.configure(

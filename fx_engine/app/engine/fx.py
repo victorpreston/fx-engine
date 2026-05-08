@@ -22,15 +22,15 @@ import asyncpg
 import structlog
 
 from app.config import settings
-from app.core.exceptions import (
+from app.exceptions import (
     CustomerNotFoundError,
     InsufficientBalanceError,
     QuoteAlreadyExecutedError,
     QuoteExpiredError,
     QuoteNotFoundError,
 )
+from app.providers.rates import RateProvider
 from app.services.metrics import quotes_created, quotes_executed, quotes_expired
-from app.services.rates import RateProvider
 
 log = structlog.get_logger(__name__)
 

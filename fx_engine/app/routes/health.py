@@ -4,10 +4,10 @@ from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from app.core.schemas import HealthComponent, HealthResponse
+from app.models.shared import HealthComponent, HealthResponse
+from app.providers.rates import rate_provider
 from app.services.database import get_pool
 from app.services.metrics import rates_stale_gauge
-from app.services.rates import rate_provider
 
 router = APIRouter(tags=["observability"])
 

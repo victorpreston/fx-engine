@@ -7,15 +7,11 @@ import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from app.core import engine
-from app.core.schemas import (
-    ExecuteRequest,
-    QuoteRequest,
-    QuoteResponse,
-    TransactionResponse,
-)
+from app.engine import fx
+from app.models.quote import ExecuteRequest, QuoteRequest, QuoteResponse
+from app.models.transaction import TransactionResponse
+from app.providers.rates import rate_provider
 from app.services.database import get_connection, get_pool
-from app.services.rates import rate_provider
 
 router = APIRouter(prefix="/quotes", tags=["quotes"])
 log = structlog.get_logger(__name__)
@@ -31,7 +27,7 @@ async def create_quote(
             status_code=400, detail="from_currency and to_currency must differ"
         )
 
-    row = await engine.generate_quote(
+    row = await fx.generate_quote(
         conn=conn,
         rate_provider=rate_provider,
         customer_id=str(body.customer_id),
@@ -63,7 +59,7 @@ async def execute_quote(
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     pool = await get_pool()
-    tx = await engine.execute_quote(
+    tx = await fx.execute_quote(
         pool=pool,
         customer_id=str(body.customer_id),
         quote_id=quote_id,
