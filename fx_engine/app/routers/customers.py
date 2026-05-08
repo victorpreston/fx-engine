@@ -7,7 +7,6 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.database import get_connection
-from app.exceptions import CustomerNotFoundError
 from app.schemas import (
     BalancesResponse,
     BalanceItem,

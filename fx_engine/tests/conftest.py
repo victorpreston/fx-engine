@@ -42,7 +42,7 @@ os.environ.setdefault("RATE_STALE_SECONDS", "3600")
 os.environ.setdefault("ENVIRONMENT", "test")
 
 from app.config import settings  # noqa: E402
-from app.database import close_pool, get_pool, run_migrations, set_type_codecs  # noqa: E402
+from app.database import run_migrations, set_type_codecs  # noqa: E402
 from app.main import app  # noqa: E402
 from app.rates import rate_provider, _FALLBACK_MID, _compute_all_mids  # noqa: E402
 import app.database as _db_module  # noqa: E402
