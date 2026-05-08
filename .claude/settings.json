@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose *)",
+      "Bash(docker compose -f docker-compose.test.yml *)",
+      "Bash(pytest *)",
+      "Bash(python -m pytest *)",
+      "Bash(uvicorn *)",
+      "Bash(pip install *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(git push *)",
+      "Bash(git branch *)",
+      "Bash(git log *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(curl http://localhost:8000/*)",
+      "Bash(mkdir -p *)"
+    ]
+  }
+}
