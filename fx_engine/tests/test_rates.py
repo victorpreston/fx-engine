@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
-from app.rates import RateProvider, _FALLBACK_MID, _compute_all_mids, PAIR_SPREADS
+from app.rates import RateProvider, _FALLBACK_MID, _compute_all_mids
 
 
 @pytest.fixture

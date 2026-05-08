@@ -27,10 +27,7 @@ import asyncpg
 from app import fx_engine
 from app.config import settings
 from app.database import set_type_codecs
-from app.exceptions import (
-    InsufficientBalanceError,
-    QuoteAlreadyExecutedError,
-)
+from app.exceptions import QuoteAlreadyExecutedError
 
 
 async def _mini_pool() -> asyncpg.Pool:
