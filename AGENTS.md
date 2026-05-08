@@ -17,7 +17,7 @@ I treated AI tooling as a force-multiplier for structural scaffolding while owni
 - **Framework:** FastAPI (async) — not Flask. Async is idiomatic for FastAPI and makes concurrency tests with `asyncio.gather` clean. Flask's WSGI model would require a thread pool and `concurrent.futures`, adding noise to the concurrency proof.
 - **Database:** PostgreSQL 16 via `asyncpg`. No ORM — direct SQL for full control over locking semantics. SQLite explicitly rejected because it cannot express `SELECT ... FOR UPDATE`.
 - **Migrations:** Alembic with raw SQL — the Python equivalent of KnexJS migrations. Three versioned migrations: initial schema, compound indexes, customer enrichment. `alembic upgrade head` runs at deploy time (in Dockerfile), not at runtime in the FastAPI lifespan.
-- **Validation:** Pydantic v2. Schemas split by domain into `models/customer.py`, `models/quote.py`, `models/transaction.py`, `models/shared.py`.
+- **Validation:** Pydantic v2. Schemas split by domain — one file per resource type.
 - **Logging:** structlog with JSON output. No `print()` statements. No bare `logging.basicConfig`. Structured JSON is machine-parseable and maps directly to the correlation-ID requirement.
 - **Metrics:** `prometheus_client` — the assignment requires `/metrics`; Prometheus format is the production standard. All counters are actually incremented (quotes_created/executed/expired, rate_fetch_success/failure, quote_errors by label, request latency histogram).
 - **Event bus:** RabbitMQ via `aio-pika`. Durable topic exchange `fx.events` with routing keys `quote.created`, `quote.executed`, `quote.expired`. Published after transaction commit — never inside it.
@@ -25,53 +25,6 @@ I treated AI tooling as a force-multiplier for structural scaffolding while owni
 - **Property tests:** Hypothesis — explicitly required by the assignment.
 - **Test client:** `httpx.AsyncClient` with `ASGITransport` for HTTP-layer tests; direct engine function calls with per-task mini-pools for concurrency tests.
 - **Middleware:** Raw ASGI class, not `BaseHTTPMiddleware`. Starlette's `BaseHTTPMiddleware` spawns anyio task groups that bind futures to a different event loop than asyncpg's pool — discovered under concurrent load and replaced with a pure ASGI `ObservabilityMiddleware` that wraps `send()` directly.
-
----
-
-## App Structure (fixed, do not change)
-
-```
-app/
-├── main.py            app factory, lifespan, middleware, error handlers
-├── config.py          pydantic-settings (reads DATABASE_URL, REDIS_URL, etc.)
-├── exceptions.py      FXError hierarchy — flat file, no folder needed
-├── models/            Pydantic schemas, one file per domain
-│   ├── customer.py
-│   ├── quote.py
-│   ├── transaction.py
-│   └── shared.py      SUPPORTED_CURRENCIES + health/rates/error schemas
-├── routes/            HTTP transport — thin, delegates to engine/services
-├── engine/            FX domain logic (generate_quote, execute_quote)
-│   └── fx.py
-├── providers/         External data sources (calls third-party APIs)
-│   └── rates.py       RateProvider — exchangeratesapi.io
-└── services/          Infrastructure we own
-    ├── database.py    asyncpg pool
-    ├── cache.py       Redis
-    ├── events.py      RabbitMQ
-    └── metrics.py     Prometheus counters + histogram
-```
-
-**The `providers/` vs `services/` distinction is deliberate:**  
-`services/` = infrastructure we control (our PostgreSQL, Redis, RabbitMQ).  
-`providers/` = external data we depend on (third-party exchange rate API).
-
----
-
-## Database Folder Structure (fixed)
-
-```
-db/
-└── versions/          Alembic migration files
-alembic.ini            At project root — Alembic expects it here by default
-```
-
-**Migrations:**
-- `001` — initial schema (customers, balances, quotes, transactions, rate_snapshots)
-- `002` — compound indexes (quotes, transactions, customers — replaces naive single-column indexes)
-- `003` — customer enrichment (phone, country, kyc_status) + quote audit fields (reference, mid_rate)
-
-Always run `alembic upgrade head` before testing against a fresh database. Always run it locally before pushing.
 
 ---
 
@@ -103,7 +56,7 @@ Always run `alembic upgrade head` before testing against a fresh database. Alway
 - **Hypothesis strategy bounds:** `0.01 NGN × 0.000677 USD/NGN` rounds to `0.00 USD` — the falsifying example surfaced this. Raised `min_value` to `"10.00"`.
 - **Staleness threshold in tests:** hardcoded `700` seconds was below `RATE_STALE_SECONDS=3600` in CI. Fixed to `settings.rate_stale_seconds + 60`.
 - **Alembic migration ordering:** ran `alembic upgrade head` locally before every push. Migration 002 originally referenced the `country` column before it was added in 003 — caught locally, fixed before committing.
-- **psycopg2 URL format for Alembic:** verified the `postgresql+asyncpg://` → `postgresql://` prefix substitution in `db/env.py` handles both URL forms correctly.
+- **psycopg2 URL format for Alembic:** verified the `postgresql+asyncpg://` → `postgresql://` prefix substitution in the Alembic env file handles both URL forms correctly.
 - **Prometheus counters actually increment:** verified via `GET /metrics` after executing a quote — `fx_quotes_created_total` and `fx_quotes_executed_total` both showed `1.0`. Previous versions had the counters declared but never called `.inc()`.
 - **Composite index column order:** verified `(customer_id, status, created_at DESC)` supports the primary dashboard query pattern through PostgreSQL's index scan planner.
 
@@ -141,9 +94,8 @@ Always run `alembic upgrade head` before testing against a fresh database. Alway
 | ORM-based Alembic autogenerate | No SQLAlchemy models to diff against; raw SQL in migrations is clearer and auditable |
 | `run_migrations()` in the FastAPI lifespan | Migrations are a deploy-time concern, not runtime; moved to Dockerfile CMD |
 | `idx_customers_country` in migration 002 | Column doesn't exist until migration 003 — caught by running locally before committing |
-| `grafana/` as a top-level folder | Names a tool, not a concept; renamed to `monitoring/` |
-| All schemas in one `schemas.py` | 149-line file mixing all domains; split into `models/{customer,quote,transaction,shared}.py` |
-| `services/rates.py` | RateProvider is not an infrastructure adapter we own — it's an external data source; moved to `providers/rates.py` |
+| Kafka for event publishing | Stream-processing tooling at the wrong scale; RabbitMQ is the correct fit for task-queue patterns |
+| Redis Pub/Sub for events | No message persistence — consumers miss events if offline; RabbitMQ durable exchange guarantees delivery |
 
 ---
 

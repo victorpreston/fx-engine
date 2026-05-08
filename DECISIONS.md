@@ -24,10 +24,6 @@
 **Why psycopg2 for Alembic, asyncpg for the runtime:** Alembic is a CLI tool that runs synchronously before the app starts. It doesn't need async. Adding asyncpg as a synchronous Alembic driver is complex and unnecessary. psycopg2 is only used by Alembic; the live API uses asyncpg exclusively.  
 **Migration as deploy step:** `Dockerfile` runs `alembic upgrade head && uvicorn ...`. Migrations are a deploy-time concern, not a runtime concern — they do not run inside the FastAPI lifespan.
 
-### `db/` Folder for Migrations
-**Decision (mine):** `db/versions/` for Alembic revision files, `alembic.ini` at the project root.  
-**Why:** `migrations/` is too generic — it doesn't signal ownership or tooling. `db/` communicates "everything database schema lives here." Alembic's `alembic.ini` stays at the root by convention (`alembic upgrade head` expects it there by default); moving it requires passing `-c` everywhere.  
-**Trade-off:** `alembic.ini` at root and scripts in `db/` is a slight split, but it follows Alembic's own documented recommended layout.
 
 ### Three Migrations — Rationale for Each
 **001 initial_schema:** Full schema in one migration. It was the only migration at the time and there was nothing to separate it from.  
@@ -109,8 +105,6 @@ The original single-column `idx_quotes_customer` was dropped — it's subsumed b
 8. **Kafka for event publishing.** Kafka is stream processing at millions of events per second — over-engineering for Umba's FX volume. RabbitMQ is the correct tool for task-queue and routing patterns at this scale.
 9. **Redis Pub/Sub for events.** No persistence — messages are lost if a consumer is offline. RabbitMQ with durable exchange and persistent delivery guarantees messages survive consumer restarts.
 10. **Publishing inside the database transaction.** If publish fails, the event would trigger a rollback of an already-correct financial operation. Events publish after commit, fire-and-forget.
-11. **`grafana/` as a top-level folder.** Names a tool, not a concept. Renamed to `monitoring/`.
-12. **All schemas in one `schemas.py` file.** Split into `models/customer.py`, `models/quote.py`, `models/transaction.py`, `models/shared.py` — each domain in its own file.
 
 ---
 
@@ -121,7 +115,7 @@ The original single-column `idx_quotes_customer` was dropped — it's subsumed b
 - **Hypothesis generating edge-case Decimals** — confirmed `allow_nan=False, allow_infinity=False` prevent false-positive failures from non-numeric inputs.  
 - **GitHub Actions `services` PostgreSQL health-check** — tested that the `pg_isready` health check in the workflow correctly gates the test job start.
 - **Alembic migration ordering** — ran `alembic upgrade head` locally before every push. Migration 002 originally referenced the `country` column before it existed (added in 003); caught by the local run, fixed before committing.
-- **psycopg2 URL format for Alembic** — verified the `postgresql+asyncpg://` → `postgresql://` prefix substitution in `db/env.py` handles both URL forms correctly.
+- **psycopg2 URL format for Alembic** — verified the `postgresql+asyncpg://` → `postgresql://` prefix substitution in the Alembic env file handles both URL forms correctly.
 - **Composite index column order** — verified that `(customer_id, status, created_at DESC)` supports the `WHERE customer_id = $1 AND status = $2 ORDER BY created_at DESC` query pattern through PostgreSQL's index scan planner.
 
 ---
