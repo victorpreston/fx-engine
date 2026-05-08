@@ -44,6 +44,7 @@ async def generate_quote(
     from_currency: str,
     to_currency: str,
     from_amount: Decimal,
+    reference: str | None = None,
 ) -> asyncpg.Record:
     """
     Create and persist an FX quote.
@@ -63,6 +64,7 @@ async def generate_quote(
         raise CustomerNotFoundError(customer_id)
 
     rate = rate_provider.get_effective_rate(from_currency, to_currency)
+    mid_rate = rate_provider.get_mid_rate(from_currency, to_currency)
     to_amount = (from_amount * rate).quantize(QUANTUM, rounding=ROUND_HALF_UP)
 
     now = datetime.now(timezone.utc)
@@ -72,9 +74,9 @@ async def generate_quote(
         """
         INSERT INTO quotes
             (id, customer_id, from_currency, to_currency,
-             from_amount, to_amount, rate, expires_at)
+             from_amount, to_amount, rate, mid_rate, reference, expires_at)
         VALUES
-            (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
+            (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
         """,
         customer_id,
@@ -83,6 +85,8 @@ async def generate_quote(
         str(from_amount),
         str(to_amount),
         str(rate),
+        str(mid_rate) if mid_rate is not None else None,
+        reference,
         expires_at,
     )
     log.info(

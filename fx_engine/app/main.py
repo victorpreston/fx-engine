@@ -25,7 +25,7 @@ from app.api.routes import rates as rates_router
 from app.config import settings
 from app.core.exceptions import FXError
 from app.services.cache import close_redis, get_redis
-from app.services.database import close_pool, get_pool, run_migrations
+from app.services.database import close_pool, get_pool
 from app.services.events import close_events, connect_events
 from app.services.metrics import quote_errors, request_duration
 from app.services.rates import rate_provider
@@ -55,8 +55,7 @@ log = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup", environment=settings.environment)
-    pool = await get_pool()
-    await run_migrations(pool)
+    await get_pool()
     try:
         await get_redis()
         log.info("redis_connected")

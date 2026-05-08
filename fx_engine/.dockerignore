@@ -20,6 +20,9 @@ REVIEW.md
 # Docker compose files (not needed inside the image)
 docker-compose*.yml
 
+# Monitoring configs (mounted as volumes, not baked in)
+monitoring/
+
 # Local environment
 .env
 .env.*

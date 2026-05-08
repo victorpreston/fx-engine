@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional
 
 import httpx
 import structlog
@@ -110,6 +111,10 @@ class RateProvider:
             return True
         age = (datetime.now(timezone.utc) - self._fetched_at).total_seconds()
         return age > settings.rate_stale_seconds
+
+    def get_mid_rate(self, from_ccy: str, to_ccy: str) -> Optional[Decimal]:
+        """Return the market mid-rate for the pair, or None if unavailable."""
+        return self._mids.get(f"{from_ccy}/{to_ccy}")
 
     def get_effective_rate(self, from_ccy: str, to_ccy: str) -> Decimal:
         """

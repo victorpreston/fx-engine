@@ -38,6 +38,7 @@ async def create_quote(
         from_currency=body.from_currency,
         to_currency=body.to_currency,
         from_amount=body.amount,
+        reference=body.reference,
     )
 
     return {
@@ -48,6 +49,8 @@ async def create_quote(
         "from_amount": Decimal(str(row["from_amount"])),
         "to_amount": Decimal(str(row["to_amount"])),
         "rate": Decimal(str(row["rate"])),
+        "mid_rate": Decimal(str(row["mid_rate"])) if row["mid_rate"] else None,
+        "reference": row["reference"],
         "expires_at": row["expires_at"],
         "created_at": row["created_at"],
     }

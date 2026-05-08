@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import AsyncGenerator
 
 import asyncpg
@@ -28,15 +27,6 @@ async def close_pool() -> None:
     if _pool is not None:
         await _pool.close()
         _pool = None
-
-
-async def run_migrations(pool: asyncpg.Pool | None = None) -> None:
-    p = pool or await get_pool()
-    sql = (
-        Path(__file__).parent.parent.parent / "migrations" / "001_initial.sql"
-    ).read_text()
-    async with p.acquire() as conn:
-        await conn.execute(sql)
 
 
 async def set_type_codecs(conn: asyncpg.Connection) -> None:
