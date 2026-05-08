@@ -14,9 +14,9 @@ from decimal import Decimal
 
 import asyncpg
 
-from app import fx_engine
 from app.config import settings
-from app.database import set_type_codecs, get_pool
+from app.engine import fx
+from app.services.database import get_pool, set_type_codecs
 
 
 async def _mini_pool() -> asyncpg.Pool:
@@ -149,7 +149,7 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
     try:
         results = await asyncio.gather(
             *[
-                fx_engine.execute_quote(
+                fx.execute_quote(
                     pool=pool,
                     customer_id=customer_id,
                     quote_id=quote_id,
@@ -175,7 +175,7 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
 
     # Retry after completion must return the exact same transaction.
     pool = await get_pool()
-    retry = await fx_engine.execute_quote(
+    retry = await fx.execute_quote(
         pool=pool,
         customer_id=customer_id,
         quote_id=quote_id,

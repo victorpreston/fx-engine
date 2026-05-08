@@ -1,6 +1,7 @@
 version: "3.9"
 
 services:
+  # ── Data layer ──────────────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     environment:
@@ -17,13 +18,46 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # Management UI → http://localhost:15672  (fx/fx_secret)
+    environment:
+      RABBITMQ_DEFAULT_USER: fx
+      RABBITMQ_DEFAULT_PASS: fx_secret
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  # ── Application ─────────────────────────────────────────────────────────────
   api:
     build: .
     ports:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql://fx:fx_secret@db:5432/fx_db
-      RATE_API_URL: https://api.exchangerate-api.com/v4/latest
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://fx:fx_secret@rabbitmq:5672/
+      RATE_API_URL: https://v6.exchangerate-api.com/v6
+      RATE_API_KEY: ${RATE_API_KEY}
       RATE_STALE_SECONDS: "600"
       RATE_REFRESH_INTERVAL_SECONDS: "300"
       QUOTE_TTL_SECONDS: "60"
@@ -32,7 +66,45 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     restart: unless-stopped
+
+  # ── Monitoring ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"   # Dashboard UI → http://localhost:3000  (admin/admin)
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fx-engine.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
 
 volumes:
   pgdata:
+  redis_data:
+  rabbitmq_data:
+  prometheus_data:
+  grafana_data:

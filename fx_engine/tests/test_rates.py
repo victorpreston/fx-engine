@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
-from app.rates import RateProvider, _FALLBACK_MID, _compute_all_mids
+from app.providers.rates import _FALLBACK_MID, RateProvider, _compute_all_mids
 
 
 @pytest.fixture
@@ -81,7 +81,7 @@ async def test_refresh_updates_rates_and_timestamp(provider):
     mock_response = MagicMock()
     mock_response.raise_for_status = MagicMock()
     mock_response.json.return_value = {
-        "rates": {"EUR": 0.91, "KES": 130.5, "NGN": 1490.0}
+        "conversion_rates": {"EUR": 0.91, "KES": 130.5, "NGN": 1490.0}
     }
     mock_client = AsyncMock()
     mock_client.get.return_value = mock_response
@@ -108,7 +108,7 @@ async def test_refresh_failure_preserves_existing_rates(provider):
 
 
 def test_all_12_pairs_covered():
-    from app.rates import SUPPORTED_CURRENCIES
+    from app.providers.rates import SUPPORTED_CURRENCIES
 
     currencies = list(SUPPORTED_CURRENCIES)
     mids = _compute_all_mids(_FALLBACK_MID)

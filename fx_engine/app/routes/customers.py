@@ -6,14 +6,15 @@ import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.database import get_connection
-from app.schemas import (
-    BalancesResponse,
+from app.models.customer import (
     BalanceItem,
+    BalancesResponse,
     CreditRequest,
     CustomerCreate,
     CustomerResponse,
+    KycStatusUpdate,
 )
+from app.services.database import get_connection
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 log = structlog.get_logger(__name__)
@@ -27,17 +28,24 @@ async def create_customer(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO customers (name, email)
-            VALUES ($1, $2)
+            INSERT INTO customers (name, email, phone, country)
+            VALUES ($1, $2, $3, $4)
             RETURNING *
             """,
             body.name,
             body.email,
+            body.phone,
+            body.country,
         )
     except asyncpg.UniqueViolationError:
         raise HTTPException(status_code=409, detail="Email already registered")
 
-    log.info("customer_created", customer_id=str(row["id"]), email=body.email)
+    log.info(
+        "customer_created",
+        customer_id=str(row["id"]),
+        email=body.email,
+        country=body.country,
+    )
     return dict(row)
 
 
@@ -49,6 +57,37 @@ async def get_customer(
     row = await conn.fetchrow("SELECT * FROM customers WHERE id = $1", customer_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    return dict(row)
+
+
+@router.patch("/{customer_id}/kyc", response_model=CustomerResponse)
+async def update_kyc_status(
+    customer_id: str,
+    body: KycStatusUpdate,
+    conn: asyncpg.Connection = Depends(get_connection),
+):
+    """
+    Update a customer's KYC verification status.
+    In production this endpoint would be restricted to internal/admin roles.
+    """
+    row = await conn.fetchrow(
+        """
+        UPDATE customers
+           SET kyc_status = $1
+         WHERE id = $2
+        RETURNING *
+        """,
+        body.kyc_status,
+        customer_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    log.info(
+        "kyc_status_updated",
+        customer_id=customer_id,
+        kyc_status=body.kyc_status,
+    )
     return dict(row)
 
 
@@ -85,8 +124,9 @@ async def credit_balance(
     conn: asyncpg.Connection = Depends(get_connection),
 ):
     """
-    Test fixture — manually credit a customer's balance.
-    Not exposed in production; exists to bootstrap test scenarios.
+    Credit a customer's balance in a given currency.
+    Intended as an internal funding endpoint; in production this should
+    be protected behind authentication or restricted to internal networks.
     """
     customer = await conn.fetchrow(
         "SELECT id FROM customers WHERE id = $1", customer_id

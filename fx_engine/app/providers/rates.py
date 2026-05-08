@@ -5,16 +5,17 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional
+
 import httpx
 import structlog
 
 from app.config import settings
 from app.exceptions import RatesUnavailableError, UnsupportedCurrencyPairError
+from app.services.metrics import rate_fetch_failure, rate_fetch_success
 
 log = structlog.get_logger(__name__)
 
-# Per-pair spread as a decimal fraction.  Customer always receives slightly
-# worse than mid — bank retains the spread as revenue.
 PAIR_SPREADS: dict[str, Decimal] = {
     "USD/EUR": Decimal("0.003"),
     "USD/KES": Decimal("0.0075"),
@@ -32,7 +33,6 @@ PAIR_SPREADS: dict[str, Decimal] = {
 
 DEFAULT_SPREAD = Decimal("0.005")
 
-# Fallback mid-rates used when the live API is unreachable at startup.
 _FALLBACK_MID: dict[str, Decimal] = {
     "EUR": Decimal("0.9200"),
     "KES": Decimal("129.50"),
@@ -65,11 +65,12 @@ def _compute_all_mids(usd_rates: dict[str, Decimal]) -> dict[str, Decimal]:
 
 class RateProvider:
     """
-    Thread-safe async rate provider.
+    Async rate provider with Redis-backed shared cache.
 
-    Mid-rates are fetched from exchangeratesapi.io (free tier).  On failure
-    the provider serves the last known rates up to `rate_stale_seconds`; after
-    that threshold new quote requests are rejected with 503.
+    Mid-rates are fetched from exchangeratesapi.io (free tier).  On
+    failure the provider tries Redis, then falls back to seed data.
+    Rates older than `rate_stale_seconds` cause new quote requests to
+    return 503 until a refresh succeeds.
     """
 
     def __init__(self) -> None:
@@ -79,16 +80,23 @@ class RateProvider:
         self._refresh_task: asyncio.Task | None = None
         self._http: httpx.AsyncClient | None = None
 
-    # ── lifecycle ────────────────────────────────────────────────────────────
-
     async def start(self) -> None:
+        from app.services.cache import load_cached_rates
+
         self._http = httpx.AsyncClient(timeout=10.0)
         try:
             await self._do_refresh()
         except Exception as exc:
-            log.warning("initial rate fetch failed, using fallback", error=str(exc))
-            self._mids = _compute_all_mids(_FALLBACK_MID)
-            self._fetched_at = datetime.now(timezone.utc)
+            log.warning("initial rate fetch failed, trying Redis cache", error=str(exc))
+            cached = await load_cached_rates()
+            if cached:
+                self._mids = cached
+                self._fetched_at = datetime.now(timezone.utc)
+                log.info("rates loaded from Redis cache", pairs=len(self._mids))
+            else:
+                log.warning("Redis cache empty, using seed fallback")
+                self._mids = _compute_all_mids(_FALLBACK_MID)
+                self._fetched_at = datetime.now(timezone.utc)
 
         self._refresh_task = asyncio.create_task(self._background_loop())
 
@@ -98,13 +106,15 @@ class RateProvider:
         if self._http:
             await self._http.aclose()
 
-    # ── public API ───────────────────────────────────────────────────────────
-
     def is_stale(self) -> bool:
         if self._fetched_at is None:
             return True
         age = (datetime.now(timezone.utc) - self._fetched_at).total_seconds()
         return age > settings.rate_stale_seconds
+
+    def get_mid_rate(self, from_ccy: str, to_ccy: str) -> Optional[Decimal]:
+        """Return the market mid-rate for the pair, or None if unavailable."""
+        return self._mids.get(f"{from_ccy}/{to_ccy}")
 
     def get_effective_rate(self, from_ccy: str, to_ccy: str) -> Decimal:
         """
@@ -113,9 +123,6 @@ class RateProvider:
         The rate is the mid-rate adjusted by the pair-specific spread so that
         the customer always receives slightly less than mid — the bank retains
         the difference as revenue.
-
-        Raises RatesUnavailableError if rates are stale.
-        Raises UnsupportedCurrencyPairError if the pair is not supported.
         """
         if self.is_stale():
             raise RatesUnavailableError(
@@ -128,7 +135,6 @@ class RateProvider:
             raise UnsupportedCurrencyPairError(from_ccy, to_ccy)
 
         spread = PAIR_SPREADS.get(pair, DEFAULT_SPREAD)
-        # Customer receives mid × (1 − spread): always slightly worse than mid.
         return mid * (Decimal("1") - spread)
 
     def snapshot(self) -> dict:
@@ -150,9 +156,11 @@ class RateProvider:
 
     async def refresh(self) -> None:
         """Force an immediate refresh. Called by POST /rates/refresh."""
-        await self._do_refresh()
-
-    # ── internals ────────────────────────────────────────────────────────────
+        try:
+            await self._do_refresh()
+        except Exception:
+            rate_fetch_failure.inc()
+            raise
 
     async def _background_loop(self) -> None:
         while True:
@@ -163,14 +171,21 @@ class RateProvider:
                 raise
             except Exception as exc:
                 log.warning("background rate refresh failed", error=str(exc))
+                rate_fetch_failure.inc()
 
     async def _do_refresh(self) -> None:
+        from app.services.cache import cache_rates
+
         async with self._lock:
-            assert self._http is not None
-            resp = await self._http.get(f"{settings.rate_api_url}/USD")
+            if self._http is None:
+                raise RuntimeError("RateProvider.start() must be called before refresh")
+            # v6 endpoint: /v6/{API_KEY}/latest/{base}
+            url = f"{settings.rate_api_url}/{settings.rate_api_key}/latest/USD"
+            resp = await self._http.get(url)
             resp.raise_for_status()
             data = resp.json()
-            raw = data.get("rates", data)
+            # v6 response uses "conversion_rates"; fall back for test mocks
+            raw = data.get("conversion_rates", data.get("rates", data))
 
             usd_rates = {
                 "EUR": Decimal(str(raw["EUR"])),
@@ -180,7 +195,8 @@ class RateProvider:
             self._mids = _compute_all_mids(usd_rates)
             self._fetched_at = datetime.now(timezone.utc)
             log.info("rates refreshed", pairs=len(self._mids), source="api")
+            rate_fetch_success.inc()
+            await cache_rates(self._mids)
 
 
-# Module-level singleton — shared across the process.
 rate_provider = RateProvider()
