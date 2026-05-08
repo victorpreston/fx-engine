@@ -14,10 +14,7 @@ log = structlog.get_logger(__name__)
 async def get_rates():
     snap = rate_provider.snapshot()
     return {
-        "pairs": {
-            pair: RatePairDetail(**vals)
-            for pair, vals in snap.items()
-        },
+        "pairs": {pair: RatePairDetail(**vals) for pair, vals in snap.items()},
         "last_updated": rate_provider.last_updated(),
         "source": "exchangeratesapi.io",
         "is_stale": rate_provider.is_stale(),

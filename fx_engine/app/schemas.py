@@ -45,7 +45,9 @@ class CreditRequest(BaseModel):
     @classmethod
     def currency_must_be_supported(cls, v: str) -> str:
         if v not in SUPPORTED_CURRENCIES:
-            raise ValueError(f"Unsupported currency: {v}. Supported: {sorted(SUPPORTED_CURRENCIES)}")
+            raise ValueError(
+                f"Unsupported currency: {v}. Supported: {sorted(SUPPORTED_CURRENCIES)}"
+            )
         return v
 
     @field_validator("amount", mode="before")
@@ -64,7 +66,9 @@ class QuoteRequest(BaseModel):
     @classmethod
     def currency_must_be_supported(cls, v: str) -> str:
         if v not in SUPPORTED_CURRENCIES:
-            raise ValueError(f"Unsupported currency: {v}. Supported: {sorted(SUPPORTED_CURRENCIES)}")
+            raise ValueError(
+                f"Unsupported currency: {v}. Supported: {sorted(SUPPORTED_CURRENCIES)}"
+            )
         return v
 
     @field_validator("amount", mode="before")

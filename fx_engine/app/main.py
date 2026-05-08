@@ -8,6 +8,7 @@ loop, which conflicts with asyncpg's pool (bound to the asyncio loop)
 under concurrent load.  The pure ASGI class wraps `send` directly —
 no tasks, no futures, no cross-loop confusion.
 """
+
 from __future__ import annotations
 
 import time
@@ -92,9 +93,7 @@ class ObservabilityMiddleware:
             return
 
         raw_headers: dict[bytes, bytes] = dict(scope.get("headers", []))
-        request_id = (
-            raw_headers.get(b"x-request-id", b"").decode() or str(uuid.uuid4())
-        )
+        request_id = raw_headers.get(b"x-request-id", b"").decode() or str(uuid.uuid4())
 
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(

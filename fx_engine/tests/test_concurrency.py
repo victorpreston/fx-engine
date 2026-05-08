@@ -17,6 +17,7 @@ The SELECT … FOR UPDATE locking is still real — the transactions are sent to
 the same PostgreSQL server and race against each other exactly as they would
 in production.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -27,10 +28,7 @@ import asyncpg
 from app import fx_engine
 from app.config import settings
 from app.database import set_type_codecs
-from app.exceptions import (
-    InsufficientBalanceError,
-    QuoteAlreadyExecutedError,
-)
+from app.exceptions import QuoteAlreadyExecutedError
 
 
 async def _mini_pool() -> asyncpg.Pool:
@@ -88,6 +86,7 @@ async def test_concurrent_execute_only_one_succeeds(funded_customer, pending_quo
 
     # Exactly one transaction row in the database.
     from app.database import get_pool
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         count = await conn.fetchval(
@@ -136,17 +135,20 @@ async def test_concurrent_execute_balance_debited_exactly_once(client, funded_cu
             await pool.close()
 
     balances_resp = await client.get(f"/customers/{funded_customer['id']}/balances")
-    balances = {b["currency"]: Decimal(b["amount"]) for b in balances_resp.json()["balances"]}
+    balances = {
+        b["currency"]: Decimal(b["amount"]) for b in balances_resp.json()["balances"]
+    }
 
     # Started with 1000 (fixture) + 500 (above) = 1500 USD. Debited exactly 100.
     expected = Decimal("1000.00") + extra - from_amount
     assert balances["USD"] == expected, (
-        f"Expected USD={expected}, got {balances['USD']} "
-        f"(double-debit if lower)"
+        f"Expected USD={expected}, got {balances['USD']} (double-debit if lower)"
     )
 
 
-async def test_different_quotes_execute_concurrently_no_deadlock(client, funded_customer):
+async def test_different_quotes_execute_concurrently_no_deadlock(
+    client, funded_customer
+):
     """
     Two quotes converting in opposite directions execute concurrently without
     deadlocking.  Alphabetical balance-lock ordering prevents hold-and-wait.
@@ -156,25 +158,39 @@ async def test_different_quotes_execute_concurrently_no_deadlock(client, funded_
         json={"currency": "EUR", "amount": "500.00"},
     )
 
-    q1 = (await client.post(
-        "/quotes",
-        json={"customer_id": funded_customer["id"],
-              "from_currency": "USD", "to_currency": "EUR", "amount": "50.00"},
-    )).json()
+    q1 = (
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": funded_customer["id"],
+                "from_currency": "USD",
+                "to_currency": "EUR",
+                "amount": "50.00",
+            },
+        )
+    ).json()
 
-    q2 = (await client.post(
-        "/quotes",
-        json={"customer_id": funded_customer["id"],
-              "from_currency": "EUR", "to_currency": "USD", "amount": "50.00"},
-    )).json()
+    q2 = (
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": funded_customer["id"],
+                "from_currency": "EUR",
+                "to_currency": "USD",
+                "amount": "50.00",
+            },
+        )
+    ).json()
 
     p1, p2 = await _mini_pool(), await _mini_pool()
     try:
         r1, r2 = await asyncio.gather(
-            fx_engine.execute_quote(pool=p1, customer_id=funded_customer["id"],
-                                    quote_id=q1["quote_id"]),
-            fx_engine.execute_quote(pool=p2, customer_id=funded_customer["id"],
-                                    quote_id=q2["quote_id"]),
+            fx_engine.execute_quote(
+                pool=p1, customer_id=funded_customer["id"], quote_id=q1["quote_id"]
+            ),
+            fx_engine.execute_quote(
+                pool=p2, customer_id=funded_customer["id"], quote_id=q2["quote_id"]
+            ),
             return_exceptions=True,
         )
     finally:

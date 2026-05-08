@@ -1,11 +1,10 @@
 """Rate provider — fetches live rates, applies spreads, handles staleness."""
+
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
-
 import httpx
 import structlog
 

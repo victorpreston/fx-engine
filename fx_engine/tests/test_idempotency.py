@@ -5,6 +5,7 @@ Sequential tests go through the HTTP client (no pool issues).
 The concurrent-retry test uses per-task mini-pools for the same reason
 as test_concurrency.py — see that module for the full explanation.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,7 +29,9 @@ async def _mini_pool() -> asyncpg.Pool:
     )
 
 
-async def test_same_idempotency_key_returns_identical_response(client, funded_customer, pending_quote):
+async def test_same_idempotency_key_returns_identical_response(
+    client, funded_customer, pending_quote
+):
     key = str(uuid.uuid4())
     quote_id = pending_quote["quote_id"]
     customer_id = funded_customer["id"]
@@ -49,7 +52,9 @@ async def test_same_idempotency_key_returns_identical_response(client, funded_cu
     assert first.json()["transaction_id"] == second.json()["transaction_id"]
 
 
-async def test_idempotent_retry_does_not_debit_twice(client, funded_customer, pending_quote):
+async def test_idempotent_retry_does_not_debit_twice(
+    client, funded_customer, pending_quote
+):
     key = str(uuid.uuid4())
     quote_id = pending_quote["quote_id"]
     customer_id = funded_customer["id"]
@@ -62,7 +67,9 @@ async def test_idempotent_retry_does_not_debit_twice(client, funded_customer, pe
         )
 
     balances_resp = await client.get(f"/customers/{customer_id}/balances")
-    balances = {b["currency"]: Decimal(b["amount"]) for b in balances_resp.json()["balances"]}
+    balances = {
+        b["currency"]: Decimal(b["amount"]) for b in balances_resp.json()["balances"]
+    }
 
     # 1000 USD − 100 USD = 900. Lower means double-debit.
     assert balances["USD"] == Decimal("900.00"), (
@@ -75,16 +82,28 @@ async def test_different_idempotency_keys_are_independent(client, funded_custome
         f"/customers/{funded_customer['id']}/balances/credit",
         json={"currency": "USD", "amount": "1000.00"},
     )
-    q1 = (await client.post(
-        "/quotes",
-        json={"customer_id": funded_customer["id"], "from_currency": "USD",
-              "to_currency": "EUR", "amount": "50.00"},
-    )).json()
-    q2 = (await client.post(
-        "/quotes",
-        json={"customer_id": funded_customer["id"], "from_currency": "USD",
-              "to_currency": "KES", "amount": "50.00"},
-    )).json()
+    q1 = (
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": funded_customer["id"],
+                "from_currency": "USD",
+                "to_currency": "EUR",
+                "amount": "50.00",
+            },
+        )
+    ).json()
+    q2 = (
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": funded_customer["id"],
+                "from_currency": "USD",
+                "to_currency": "KES",
+                "amount": "50.00",
+            },
+        )
+    ).json()
 
     r1 = await client.post(
         f"/quotes/{q1['quote_id']}/execute",
@@ -102,7 +121,9 @@ async def test_different_idempotency_keys_are_independent(client, funded_custome
     assert r1.json()["transaction_id"] != r2.json()["transaction_id"]
 
 
-async def test_concurrent_retry_with_same_key_executes_exactly_once(funded_customer, pending_quote):
+async def test_concurrent_retry_with_same_key_executes_exactly_once(
+    funded_customer, pending_quote
+):
     """
     Tests two things:
 
