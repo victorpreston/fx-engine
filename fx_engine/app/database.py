@@ -47,6 +47,7 @@ async def set_type_codecs(conn: asyncpg.Connection) -> None:
         format="text",
     )
 
+
 # Keep the private alias so existing internal callers still work.
 _set_type_codecs = set_type_codecs
 

@@ -46,9 +46,7 @@ async def get_customer(
     customer_id: str,
     conn: asyncpg.Connection = Depends(get_connection),
 ):
-    row = await conn.fetchrow(
-        "SELECT * FROM customers WHERE id = $1", customer_id
-    )
+    row = await conn.fetchrow("SELECT * FROM customers WHERE id = $1", customer_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Customer not found")
     return dict(row)
@@ -71,11 +69,16 @@ async def get_balances(
     )
     return {
         "customer_id": customer_id,
-        "balances": [{"currency": r["currency"], "amount": Decimal(str(r["amount"]))} for r in rows],
+        "balances": [
+            {"currency": r["currency"], "amount": Decimal(str(r["amount"]))}
+            for r in rows
+        ],
     }
 
 
-@router.post("/{customer_id}/balances/credit", response_model=BalanceItem, status_code=200)
+@router.post(
+    "/{customer_id}/balances/credit", response_model=BalanceItem, status_code=200
+)
 async def credit_balance(
     customer_id: str,
     body: CreditRequest,

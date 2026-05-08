@@ -22,7 +22,9 @@ async def create_quote(
     conn: asyncpg.Connection = Depends(get_connection),
 ):
     if body.from_currency == body.to_currency:
-        raise HTTPException(status_code=400, detail="from_currency and to_currency must differ")
+        raise HTTPException(
+            status_code=400, detail="from_currency and to_currency must differ"
+        )
 
     # FXError propagates to the app-level exception handler in main.py,
     # which returns the structured {error, error_code, request_id} format.
