@@ -51,8 +51,6 @@ async def test_execute_fails_on_expired_quote(client, funded_customer, monkeypat
     # Wind time forward past TTL by patching datetime inside fx_engine.
     future = datetime.now(timezone.utc) + timedelta(seconds=settings.quote_ttl_seconds + 5)
     import app.fx_engine as fx_module
-    original = fx_module.datetime
-
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):

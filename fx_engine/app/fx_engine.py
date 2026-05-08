@@ -16,7 +16,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
-from uuid import uuid4
 
 import asyncpg
 import structlog

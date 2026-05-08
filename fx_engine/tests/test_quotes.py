@@ -46,7 +46,6 @@ async def test_quote_amount_has_two_decimal_places(client, funded_customer):
 async def test_quote_rate_is_locked_at_generation_time(client, funded_customer, monkeypatch):
     """Rate stored in the quote must not change when live rates shift."""
     from app.rates import rate_provider
-    from decimal import Decimal
     from datetime import datetime, timezone
 
     resp = await client.post(

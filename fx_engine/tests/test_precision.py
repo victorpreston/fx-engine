@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
 
-import pytest
 from hypothesis import assume, given, settings as hyp_settings
 from hypothesis import strategies as st
 
