@@ -4,7 +4,8 @@ You are working on the FX Engine. The task is to replace the current rate source
 
 ## What to change
 
-### `fx_engine/app/rates.py` — `_do_refresh()`
+### `fx_engine/app/providers/rates.py` — `_do_refresh()`
+
 The current implementation:
 ```python
 resp = await self._http.get(f"{settings.rate_api_url}/USD")
@@ -27,14 +28,19 @@ Update `rate_api_url` default if the base URL changes.
 ### `fx_engine/.env.example`
 Update `RATE_API_URL` to the new provider's base URL.
 
+### `fx_engine/docker-compose.yml`
+Update the `RATE_API_URL` environment variable in the `api` service.
+
 ## What NOT to change
-- `_compute_all_mids()` — this derives all 12 pairs and must not change
+- `_compute_all_mids()` — derives all 12 pairs from three USD-base rates
 - `PAIR_SPREADS` — spread policy is independent of the source
 - Staleness detection — `is_stale()` logic stays the same
-- The fallback `_FALLBACK_MID` values — update only if the new source gives significantly different rates
+- `_FALLBACK_MID` values — update only if the new source gives significantly different rates
+- Redis caching — `cache_rates()` is called at the end of `_do_refresh()` regardless of source
 
 ## Tests to run after
 ```bash
 pytest tests/test_rates.py -v
 ```
-The `test_refresh_updates_rates_and_timestamp` test mocks the HTTP client — update the mock response shape to match the new provider if needed.
+
+The `test_refresh_updates_rates_and_timestamp` test mocks the HTTP client — update the mock response shape to match the new provider's JSON structure.
