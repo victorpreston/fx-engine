@@ -48,8 +48,9 @@ async def test_quote_rate_is_locked_at_generation_time(
     client, funded_customer, monkeypatch
 ):
     """Rate stored in the quote must not change when live rates shift."""
-    from app.rates import rate_provider
     from datetime import datetime, timezone
+
+    from app.providers.rates import rate_provider
 
     resp = await client.post(
         "/quotes",

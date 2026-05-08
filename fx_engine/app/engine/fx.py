@@ -29,7 +29,8 @@ from app.exceptions import (
     QuoteExpiredError,
     QuoteNotFoundError,
 )
-from app.rates import RateProvider
+from app.providers.rates import RateProvider
+from app.services.metrics import quotes_created, quotes_executed, quotes_expired
 
 log = structlog.get_logger(__name__)
 
@@ -43,6 +44,7 @@ async def generate_quote(
     from_currency: str,
     to_currency: str,
     from_amount: Decimal,
+    reference: str | None = None,
 ) -> asyncpg.Record:
     """
     Create and persist an FX quote.
@@ -55,17 +57,14 @@ async def generate_quote(
     if from_amount <= 0:
         raise ValueError("amount must be positive")
 
-    # Verify customer exists.
     customer = await conn.fetchrow(
         "SELECT id FROM customers WHERE id = $1", customer_id
     )
     if customer is None:
         raise CustomerNotFoundError(customer_id)
 
-    # Get effective rate (raises if stale or unsupported pair).
     rate = rate_provider.get_effective_rate(from_currency, to_currency)
-
-    # All arithmetic in Decimal; quantize only the final output amount.
+    mid_rate = rate_provider.get_mid_rate(from_currency, to_currency)
     to_amount = (from_amount * rate).quantize(QUANTUM, rounding=ROUND_HALF_UP)
 
     now = datetime.now(timezone.utc)
@@ -75,9 +74,9 @@ async def generate_quote(
         """
         INSERT INTO quotes
             (id, customer_id, from_currency, to_currency,
-             from_amount, to_amount, rate, expires_at)
+             from_amount, to_amount, rate, mid_rate, reference, expires_at)
         VALUES
-            (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7)
+            (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
         RETURNING *
         """,
         customer_id,
@@ -86,6 +85,8 @@ async def generate_quote(
         str(from_amount),
         str(to_amount),
         str(rate),
+        str(mid_rate) if mid_rate is not None else None,
+        reference,
         expires_at,
     )
     log.info(
@@ -96,6 +97,22 @@ async def generate_quote(
         from_amount=str(from_amount),
         to_amount=str(to_amount),
         rate=str(rate),
+    )
+    quotes_created.inc()
+    from app.services.events import publish
+
+    await publish(
+        "quote.created",
+        {
+            "quote_id": str(row["id"]),
+            "customer_id": customer_id,
+            "from_currency": from_currency,
+            "to_currency": to_currency,
+            "from_amount": str(from_amount),
+            "to_amount": str(to_amount),
+            "rate": str(rate),
+            "expires_at": row["expires_at"].isoformat(),
+        },
     )
     return row
 
@@ -141,17 +158,20 @@ async def execute_quote(
             if quote is None:
                 raise QuoteNotFoundError(quote_id)
 
-            # Ownership check — don't leak that the quote exists to other customers.
             if str(quote["customer_id"]) != str(customer_id):
                 raise QuoteNotFoundError(quote_id)
 
             now = datetime.now(timezone.utc)
 
-            if quote["expires_at"].replace(tzinfo=timezone.utc) < now:
+            if quote["expires_at"].astimezone(timezone.utc) < now:
                 await conn.execute(
                     "UPDATE quotes SET status = 'expired' WHERE id = $1",
                     quote_id,
                 )
+                quotes_expired.inc()
+                from app.services.events import publish
+
+                await publish("quote.expired", {"quote_id": quote_id})
                 raise QuoteExpiredError(quote_id)
 
             if quote["status"] != "pending":
@@ -246,5 +266,21 @@ async def execute_quote(
             pair=f"{from_ccy}/{to_ccy}",
             from_amount=str(from_amount),
             to_amount=str(to_amount),
+        )
+        quotes_executed.inc()
+        from app.services.events import publish
+
+        await publish(
+            "quote.executed",
+            {
+                "transaction_id": str(tx["id"]),
+                "quote_id": quote_id,
+                "customer_id": customer_id,
+                "from_currency": from_ccy,
+                "to_currency": to_ccy,
+                "from_amount": str(from_amount),
+                "to_amount": str(to_amount),
+                "rate": str(rate),
+            },
         )
         return tx
