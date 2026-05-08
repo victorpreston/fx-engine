@@ -1,4 +1,5 @@
 """Tests for the rate provider — staleness, fallback, refresh."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -34,7 +35,10 @@ def test_effective_rate_is_worse_than_mid(provider):
 
 def test_stale_rates_raise_unavailable(provider):
     from app.config import settings
-    provider._fetched_at = datetime.now(timezone.utc) - timedelta(seconds=settings.rate_stale_seconds + 60)
+
+    provider._fetched_at = datetime.now(timezone.utc) - timedelta(
+        seconds=settings.rate_stale_seconds + 60
+    )
     with pytest.raises(RatesUnavailableError):
         provider.get_effective_rate("USD", "KES")
 
@@ -105,6 +109,7 @@ async def test_refresh_failure_preserves_existing_rates(provider):
 
 def test_all_12_pairs_covered():
     from app.rates import SUPPORTED_CURRENCIES
+
     currencies = list(SUPPORTED_CURRENCIES)
     mids = _compute_all_mids(_FALLBACK_MID)
     for a in currencies:

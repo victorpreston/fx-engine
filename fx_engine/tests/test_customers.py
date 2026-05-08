@@ -1,4 +1,5 @@
 """Tests for customer management and balance operations."""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -46,8 +47,14 @@ async def test_credit_balance(client, customer):
 
 async def test_credit_accumulates(client, customer):
     cid = customer["id"]
-    await client.post(f"/customers/{cid}/balances/credit", json={"currency": "KES", "amount": "1000.00"})
-    await client.post(f"/customers/{cid}/balances/credit", json={"currency": "KES", "amount": "500.00"})
+    await client.post(
+        f"/customers/{cid}/balances/credit",
+        json={"currency": "KES", "amount": "1000.00"},
+    )
+    await client.post(
+        f"/customers/{cid}/balances/credit",
+        json={"currency": "KES", "amount": "500.00"},
+    )
     resp = await client.get(f"/customers/{cid}/balances")
     balances = {b["currency"]: Decimal(b["amount"]) for b in resp.json()["balances"]}
     assert balances["KES"] == Decimal("1500.00")

@@ -20,6 +20,7 @@ Requires a running PostgreSQL instance:
     docker compose -f docker-compose.test.yml up -d
     TEST_DATABASE_URL=postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db pytest
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -50,6 +51,7 @@ import app.database as _db_module  # noqa: E402
 
 # ── Schema (session-scoped, synchronous) ──────────────────────────────────────
 
+
 @pytest.fixture(scope="session", autouse=True)
 def db_schema():
     """
@@ -58,6 +60,7 @@ def db_schema():
     Synchronous so it creates its own temporary event loop via asyncio.run().
     This avoids the fixture needing to share a loop with any test.
     """
+
     async def _migrate():
         pool = await asyncpg.create_pool(
             settings.database_url,
@@ -75,6 +78,7 @@ def db_schema():
 
 
 # ── Per-test DB reset ─────────────────────────────────────────────────────────
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db():
@@ -102,6 +106,7 @@ async def clean_db():
 
 # ── Rate provider ─────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(autouse=True)
 def stable_rates(monkeypatch):
     """Pin rates to seed values — tests never depend on the live API."""
@@ -112,6 +117,7 @@ def stable_rates(monkeypatch):
 
 # ── HTTP client ───────────────────────────────────────────────────────────────
 
+
 @pytest_asyncio.fixture
 async def client():
     transport = ASGITransport(app=app)
@@ -120,6 +126,7 @@ async def client():
 
 
 # ── Domain helpers ────────────────────────────────────────────────────────────
+
 
 @pytest_asyncio.fixture
 async def customer(client) -> dict:
