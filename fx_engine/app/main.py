@@ -1,11 +1,12 @@
 """
 FX Engine — FastAPI application entry point.
 
-Request lifecycle:
-  1. Middleware attaches a request-scoped trace ID (X-Request-ID header or auto-generated UUID).
-  2. structlog binds the request ID and route metadata to every log record in the request scope.
-  3. Routers delegate to fx_engine.py for all business logic.
-  4. FX-specific exceptions are mapped to structured HTTP error responses.
+Middleware note: we use a raw ASGI middleware class instead of
+Starlette's BaseHTTPMiddleware deliberately.  BaseHTTPMiddleware spawns
+anyio task groups whose futures get bound to the anyio-managed event
+loop, which conflicts with asyncpg's pool (bound to the asyncio loop)
+under concurrent load.  The pure ASGI class wraps `send` directly —
+no tasks, no futures, no cross-loop confusion.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import settings
 from app.database import close_pool, get_pool, run_migrations
@@ -28,7 +30,6 @@ structlog.configure(
     processors=[
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
-        structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.JSONRenderer(),
@@ -71,32 +72,68 @@ app = FastAPI(
 )
 
 
-# ── Middleware ────────────────────────────────────────────────────────────────
-@app.middleware("http")
-async def observability_middleware(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(
-        request_id=request_id,
-        method=request.method,
-        path=request.url.path,
-    )
-    start = time.monotonic()
-    response = await call_next(request)
-    duration_ms = round((time.monotonic() - start) * 1000, 2)
-    log.info(
-        "request_completed",
-        status_code=response.status_code,
-        duration_ms=duration_ms,
-    )
-    response.headers["X-Request-ID"] = request_id
-    return response
+# ── Pure ASGI observability middleware ────────────────────────────────────────
+class ObservabilityMiddleware:
+    """
+    Attaches a request-scoped trace ID, logs every request, and injects
+    X-Request-ID into responses.
+
+    Implemented as a raw ASGI callable (not BaseHTTPMiddleware) so it
+    never spawns tasks or creates futures — the only async work is
+    delegating to the inner app and forwarding messages.
+    """
+
+    def __init__(self, inner: ASGIApp) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+
+        raw_headers: dict[bytes, bytes] = dict(scope.get("headers", []))
+        request_id = (
+            raw_headers.get(b"x-request-id", b"").decode() or str(uuid.uuid4())
+        )
+
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id,
+            method=scope.get("method", ""),
+            path=scope.get("path", ""),
+        )
+
+        start = time.monotonic()
+        status_code = 500
+
+        async def send_with_trace(message: dict) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                headers_out = list(message.get("headers", []))
+                headers_out.append((b"x-request-id", request_id.encode()))
+                message = {**message, "headers": headers_out}
+            await send(message)
+
+        try:
+            await self.inner(scope, receive, send_with_trace)
+        finally:
+            duration_ms = round((time.monotonic() - start) * 1000, 2)
+            log.info(
+                "request_completed",
+                status_code=status_code,
+                duration_ms=duration_ms,
+            )
+
+
+app.add_middleware(ObservabilityMiddleware)
 
 
 # ── Global exception handlers ─────────────────────────────────────────────────
 @app.exception_handler(FXError)
-async def fx_error_handler(request: Request, exc: FXError):
-    request_id = request.headers.get("X-Request-ID", "")
+async def fx_error_handler(request: Request, exc: FXError) -> JSONResponse:
+    ctx = structlog.contextvars.get_contextvars()
+    request_id = ctx.get("request_id", "")
     log.warning("fx_error", error_code=exc.error_code, detail=str(exc))
     return JSONResponse(
         status_code=exc.status_code,
@@ -109,8 +146,9 @@ async def fx_error_handler(request: Request, exc: FXError):
 
 
 @app.exception_handler(Exception)
-async def unhandled_error_handler(request: Request, exc: Exception):
-    request_id = request.headers.get("X-Request-ID", "")
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    ctx = structlog.contextvars.get_contextvars()
+    request_id = ctx.get("request_id", "")
     log.exception("unhandled_error", exc_info=exc)
     return JSONResponse(
         status_code=500,

@@ -1,17 +1,30 @@
 """
 Test fixtures.
 
-Requires a running PostgreSQL instance.  Set TEST_DATABASE_URL in your
-environment or .env.test file, or spin up the test compose service:
+Event-loop model
+----------------
+asyncio_default_fixture_loop_scope = "function"
+
+Each test gets its own fresh asyncio event loop.  Fixtures (all
+function-scoped) share that same loop, so every asyncpg connection and
+pool is always bound to the exact loop that is running the test.
+There is no session-vs-function loop mismatch.
+
+db_schema is the one exception: it is session-scoped and must run
+migrations exactly once before any test.  Because it cannot use a
+function-scoped loop that doesn't exist yet, it is synchronous and
+calls asyncio.run() internally to spin up its own temporary loop.
+
+Requires a running PostgreSQL instance:
 
     docker compose -f docker-compose.test.yml up -d
     TEST_DATABASE_URL=postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db pytest
 """
 from __future__ import annotations
 
+import asyncio
 import os
-from decimal import Decimal
-from pathlib import Path
+from datetime import datetime, timezone
 
 import asyncpg
 import pytest
@@ -28,27 +41,53 @@ os.environ.setdefault(
 os.environ.setdefault("RATE_STALE_SECONDS", "3600")
 os.environ.setdefault("ENVIRONMENT", "test")
 
-from app.config import settings  # noqa: E402 — must come after env override
-from app.database import close_pool, get_pool, run_migrations  # noqa: E402
+from app.config import settings  # noqa: E402
+from app.database import close_pool, get_pool, run_migrations, set_type_codecs  # noqa: E402
 from app.main import app  # noqa: E402
 from app.rates import rate_provider, _FALLBACK_MID, _compute_all_mids  # noqa: E402
+import app.database as _db_module  # noqa: E402
 
 
-# ── DB-level fixtures ─────────────────────────────────────────────────────────
+# ── Schema (session-scoped, synchronous) ──────────────────────────────────────
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def db_schema():
-    """Create schema once per test session."""
-    pool = await get_pool()
-    await run_migrations(pool)
+@pytest.fixture(scope="session", autouse=True)
+def db_schema():
+    """
+    Run migrations once before the first test.
+
+    Synchronous so it creates its own temporary event loop via asyncio.run().
+    This avoids the fixture needing to share a loop with any test.
+    """
+    async def _migrate():
+        pool = await asyncpg.create_pool(
+            settings.database_url,
+            min_size=1,
+            max_size=1,
+            init=set_type_codecs,
+        )
+        try:
+            await run_migrations(pool)
+        finally:
+            await pool.close()
+
+    asyncio.run(_migrate())
     yield
-    await close_pool()
 
+
+# ── Per-test DB reset ─────────────────────────────────────────────────────────
 
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db():
-    """Truncate all tables before each test in reverse-dependency order."""
-    pool = await get_pool()
+    """
+    Close any existing pool, create a fresh one bound to this test's event
+    loop, then truncate all tables.
+
+    Because asyncio_default_fixture_loop_scope = "function", this fixture and
+    the test function share the same event loop.  The pool created here is
+    therefore always on the correct loop.
+    """
+    await _db_module.close_pool()
+    pool = await _db_module.get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -57,15 +96,16 @@ async def clean_db():
             """
         )
     yield
+    # Close pool after each test so the next test starts clean.
+    await _db_module.close_pool()
 
 
-# ── Rate provider fixture ─────────────────────────────────────────────────────
+# ── Rate provider ─────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
 def stable_rates(monkeypatch):
-    """Pin rates to fallback values so tests don't depend on live API."""
+    """Pin rates to seed values — tests never depend on the live API."""
     mids = _compute_all_mids(_FALLBACK_MID)
-    from datetime import datetime, timezone
     monkeypatch.setattr(rate_provider, "_mids", mids)
     monkeypatch.setattr(rate_provider, "_fetched_at", datetime.now(timezone.utc))
 
@@ -93,7 +133,7 @@ async def customer(client) -> dict:
 
 @pytest_asyncio.fixture
 async def funded_customer(client, customer) -> dict:
-    """A customer pre-loaded with 1,000 USD."""
+    """Customer pre-loaded with 1,000 USD."""
     await client.post(
         f"/customers/{customer['id']}/balances/credit",
         json={"currency": "USD", "amount": "1000.00"},

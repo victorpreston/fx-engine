@@ -37,7 +37,7 @@ async def run_migrations(pool: asyncpg.Pool | None = None) -> None:
         await conn.execute(sql)
 
 
-async def _set_type_codecs(conn: asyncpg.Connection) -> None:
+async def set_type_codecs(conn: asyncpg.Connection) -> None:
     """Make asyncpg return numeric columns as str so we can wrap in Decimal."""
     await conn.set_type_codec(
         "numeric",
@@ -46,6 +46,9 @@ async def _set_type_codecs(conn: asyncpg.Connection) -> None:
         schema="pg_catalog",
         format="text",
     )
+
+# Keep the private alias so existing internal callers still work.
+_set_type_codecs = set_type_codecs
 
 
 async def get_connection() -> AsyncGenerator[asyncpg.Connection, None]:

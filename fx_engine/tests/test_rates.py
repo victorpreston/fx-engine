@@ -33,7 +33,8 @@ def test_effective_rate_is_worse_than_mid(provider):
 
 
 def test_stale_rates_raise_unavailable(provider):
-    provider._fetched_at = datetime.now(timezone.utc) - timedelta(seconds=700)
+    from app.config import settings
+    provider._fetched_at = datetime.now(timezone.utc) - timedelta(seconds=settings.rate_stale_seconds + 60)
     with pytest.raises(RatesUnavailableError):
         provider.get_effective_rate("USD", "KES")
 
