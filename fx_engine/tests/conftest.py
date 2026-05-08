@@ -23,11 +23,9 @@ Requires a running PostgreSQL instance:
 
 from __future__ import annotations
 
-import asyncio
 import os
 from datetime import datetime, timezone
 
-import asyncpg
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -42,12 +40,14 @@ os.environ.setdefault(
 os.environ.setdefault("RATE_STALE_SECONDS", "3600")
 os.environ.setdefault("ENVIRONMENT", "test")
 
+import app.services.database as _db_module  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.database import run_migrations, set_type_codecs  # noqa: E402
 from app.main import app  # noqa: E402
-from app.rates import rate_provider, _FALLBACK_MID, _compute_all_mids  # noqa: E402
-import app.database as _db_module  # noqa: E402
-
+from app.providers.rates import (  # noqa: E402
+    _FALLBACK_MID,
+    _compute_all_mids,
+    rate_provider,
+)
 
 # ── Schema (session-scoped, synchronous) ──────────────────────────────────────
 
@@ -55,25 +55,21 @@ import app.database as _db_module  # noqa: E402
 @pytest.fixture(scope="session", autouse=True)
 def db_schema():
     """
-    Run migrations once before the first test.
+    Run Alembic migrations once before the first test.
 
-    Synchronous so it creates its own temporary event loop via asyncio.run().
-    This avoids the fixture needing to share a loop with any test.
+    ``alembic upgrade head`` is synchronous, so no event loop is needed.
+    This avoids the session-vs-function loop mismatch with asyncpg.
     """
+    import subprocess
 
-    async def _migrate():
-        pool = await asyncpg.create_pool(
-            settings.database_url,
-            min_size=1,
-            max_size=1,
-            init=set_type_codecs,
-        )
-        try:
-            await run_migrations(pool)
-        finally:
-            await pool.close()
-
-    asyncio.run(_migrate())
+    result = subprocess.run(
+        ["alembic", "upgrade", "head"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "DATABASE_URL": settings.database_url},
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Alembic migration failed:\n{result.stderr}")
     yield
 
 

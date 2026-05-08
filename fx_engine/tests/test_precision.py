@@ -13,11 +13,16 @@ from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
 
-from hypothesis import assume, given, settings as hyp_settings
+from hypothesis import assume, given
+from hypothesis import settings as hyp_settings
 from hypothesis import strategies as st
 
-from app.rates import _FALLBACK_MID, _compute_all_mids, PAIR_SPREADS, DEFAULT_SPREAD
-
+from app.providers.rates import (
+    _FALLBACK_MID,
+    DEFAULT_SPREAD,
+    PAIR_SPREADS,
+    _compute_all_mids,
+)
 
 MIDS = _compute_all_mids(_FALLBACK_MID)
 SUPPORTED_PAIRS = list(MIDS.keys())

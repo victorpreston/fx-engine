@@ -21,10 +21,14 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import settings
-from app.database import close_pool, get_pool, run_migrations
 from app.exceptions import FXError
-from app.rates import rate_provider
-from app.routers import customers, health, quotes, rates as rates_router
+from app.providers.rates import rate_provider
+from app.routes import customers, health, quotes
+from app.routes import rates as rates_router
+from app.services.cache import close_redis, get_redis
+from app.services.database import close_pool, get_pool
+from app.services.events import close_events, connect_events
+from app.services.metrics import quote_errors, request_duration
 
 # ── Structured logging ────────────────────────────────────────────────────────
 structlog.configure(
@@ -51,37 +55,43 @@ log = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup", environment=settings.environment)
-    pool = await get_pool()
-    await run_migrations(pool)
+    await get_pool()
+    try:
+        await get_redis()
+        log.info("redis_connected")
+    except Exception as exc:
+        log.warning("redis_unavailable", error=str(exc))
+    await connect_events()
     await rate_provider.start()
     log.info("startup_complete")
     yield
     log.info("shutdown")
     await rate_provider.stop()
+    await close_events()
+    await close_redis()
     await close_pool()
     log.info("shutdown_complete")
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
+_is_production = settings.environment == "production"
+
 app = FastAPI(
     title="FX Engine",
     description="Foreign exchange engine — quotes, execution, and customer balances.",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None if _is_production else "/docs",
+    redoc_url=None if _is_production else "/redoc",
+    openapi_url=None if _is_production else "/openapi.json",
 )
 
 
 # ── Pure ASGI observability middleware ────────────────────────────────────────
 class ObservabilityMiddleware:
     """
-    Attaches a request-scoped trace ID, logs every request, and injects
-    X-Request-ID into responses.
-
-    Implemented as a raw ASGI callable (not BaseHTTPMiddleware) so it
-    never spawns tasks or creates futures — the only async work is
-    delegating to the inner app and forwarding messages.
+    Attaches a request-scoped trace ID, logs every request, records
+    Prometheus latency histogram, and injects X-Request-ID into responses.
     """
 
     def __init__(self, inner: ASGIApp) -> None:
@@ -117,12 +127,16 @@ class ObservabilityMiddleware:
         try:
             await self.inner(scope, receive, send_with_trace)
         finally:
-            duration_ms = round((time.monotonic() - start) * 1000, 2)
+            duration = time.monotonic() - start
             log.info(
                 "request_completed",
                 status_code=status_code,
-                duration_ms=duration_ms,
+                duration_ms=round(duration * 1000, 2),
             )
+            request_duration.labels(
+                method=scope.get("method", ""),
+                path=scope.get("path", ""),
+            ).observe(duration)
 
 
 app.add_middleware(ObservabilityMiddleware)
@@ -134,6 +148,7 @@ async def fx_error_handler(request: Request, exc: FXError) -> JSONResponse:
     ctx = structlog.contextvars.get_contextvars()
     request_id = ctx.get("request_id", "")
     log.warning("fx_error", error_code=exc.error_code, detail=str(exc))
+    quote_errors.labels(error_code=exc.error_code).inc()
     return JSONResponse(
         status_code=exc.status_code,
         content={

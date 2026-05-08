@@ -1,139 +1,108 @@
-# AGENTS.md — AI Collaboration Record
+# Agent Instructions — FX Engine
 
-This document records how Claude Code was used throughout this project: the instructions given, the constraints enforced, the decisions owned, the things the AI got wrong, and the things I verified before trusting.
-
----
-
-## Role and Operating Mandate
-
-The agent was instructed to operate as a **senior backend engineer making production-grade decisions**, not as a code generator producing boilerplate. Specific framing given:
-
-- Prefer correctness and auditability over brevity
-- Make opinionated technology choices and defend them
-- Every non-trivial decision must have a documented trade-off
-- Treat the assignment as a real production system, not a demo
-- The code review section (`planted_bugs/`) is as important as the implementation
+This file records the instructions and constraints I gave to Claude Code when building this project, and my account of how the collaboration went.
 
 ---
 
-## Technology Constraints (non-negotiable)
+## Role and Goal
 
-These were specified before any code was written:
+Build a production-quality FX engine as described in `ASSIGNMENT.md`. Operate as a senior backend engineer: make opinionated decisions, explain trade-offs, prefer correctness over cleverness.
 
-| Constraint | Reason given |
+I treated AI tooling as a force-multiplier for structural scaffolding while owning every decision that touches financial correctness, concurrency safety, database schema, or system architecture.
+
+---
+
+## Stack Decisions (fixed, do not change)
+
+- **Framework:** FastAPI (async) — not Flask. Async is idiomatic for FastAPI and makes concurrency tests with `asyncio.gather` clean. Flask's WSGI model would require a thread pool and `concurrent.futures`, adding noise to the concurrency proof.
+- **Database:** PostgreSQL 16 via `asyncpg`. No ORM — direct SQL for full control over locking semantics. SQLite explicitly rejected because it cannot express `SELECT ... FOR UPDATE`.
+- **Migrations:** Alembic with raw SQL — the Python equivalent of KnexJS migrations. Three versioned migrations: initial schema, compound indexes, customer enrichment. `alembic upgrade head` runs at deploy time (in Dockerfile), not at runtime in the FastAPI lifespan.
+- **Validation:** Pydantic v2. Schemas split by domain — one file per resource type.
+- **Logging:** structlog with JSON output. No `print()` statements. No bare `logging.basicConfig`. Structured JSON is machine-parseable and maps directly to the correlation-ID requirement.
+- **Metrics:** `prometheus_client` — the assignment requires `/metrics`; Prometheus format is the production standard. All counters are actually incremented (quotes_created/executed/expired, rate_fetch_success/failure, quote_errors by label, request latency histogram).
+- **Event bus:** RabbitMQ via `aio-pika`. Durable topic exchange `fx.events` with routing keys `quote.created`, `quote.executed`, `quote.expired`. Published after transaction commit — never inside it.
+- **Shared cache:** Redis for rate distribution across workers. On refresh, rates are written to Redis so other workers benefit without hitting the live API.
+- **Property tests:** Hypothesis — explicitly required by the assignment.
+- **Test client:** `httpx.AsyncClient` with `ASGITransport` for HTTP-layer tests; direct engine function calls with per-task mini-pools for concurrency tests.
+- **Middleware:** Raw ASGI class, not `BaseHTTPMiddleware`. Starlette's `BaseHTTPMiddleware` spawns anyio task groups that bind futures to a different event loop than asyncpg's pool — discovered under concurrent load and replaced with a pure ASGI `ObservabilityMiddleware` that wraps `send()` directly.
+
+---
+
+## Constraints
+
+1. **Never use `float` for financial arithmetic.** All amounts and rates must be `Decimal`. Converting to float and back is a hard bug — and the exact pattern planted in `planted_bugs/fx.py:60`.
+2. **Concurrency safety must be at the database level.** A `threading.Lock()` is not acceptable — it breaks under multi-worker deployments. Use `SELECT ... FOR UPDATE` inside a transaction.
+3. **The rate must be locked at quote generation time.** The execution path must use `quote.rate` and `quote.to_amount` from the stored row. Never re-fetch the live rate at execution time — same bug as `planted_bugs/fx.py:126`.
+4. **Idempotency check inside the transaction.** The idempotency key lookup must run inside the same database transaction as the `SELECT FOR UPDATE` on the quote — otherwise two concurrent retries with the same key can both pass the check (TOCTOU race).
+5. **Deadlock prevention.** Always lock balance rows in alphabetical currency order. `sorted([from_ccy, to_ccy])` before `FOR UPDATE` is load-bearing.
+6. **No secrets in code.** Use environment variables and `.env.example`. `.env` is gitignored.
+7. **Tests must use real PostgreSQL.** No mocking of the database layer in concurrency or atomicity tests. Property tests may use pure functions.
+8. **Commit messages follow Conventional Commits.** `feat:`, `fix:`, `test:`, `docs:`, `ci:`, `style:`, `refactor:`, `chore:`. The git history is a graded deliverable.
+9. **One feature per branch.** Branch from `dev`, merge back to `dev` with `--no-ff`.
+10. **`asyncpg` numeric values always wrapped.** `Decimal(str(row["field"]))` on every numeric column read.
+11. **Alembic runs at deploy time, not runtime.** Never call `alembic upgrade head` inside the FastAPI lifespan. It runs in the Dockerfile CMD before uvicorn starts.
+12. **Events published after transaction commit.** Never publish to RabbitMQ inside a database transaction. The DB operation has already committed; the event must not cause a rollback.
+13. **Migration ordering must be verified locally.** Run `alembic upgrade head` locally against the test database before committing any new migration. Index creation on a column that doesn't exist yet will fail at runtime, not at lint time.
+
+---
+
+## What I Verified Myself
+
+- **Spread direction:** the customer always gets `mid × (1 − spread)`, never better than mid. Verified manually that `buy < mid < sell` holds for every pair in `test_snapshot_sell_gt_mid_gt_buy`.
+- **Deadlock ordering:** verified that PostgreSQL acquires row locks in the order rows are returned, so `ORDER BY currency FOR UPDATE` guarantees a stable lock order.
+- **Idempotency TOCTOU fix:** confirmed the idempotency `fetchrow` runs before the quote `FOR UPDATE`, inside `conn.transaction()`.
+- **Cross-pair mid derivation:** verified `EUR/KES = USD/KES ÷ USD/EUR` against the seed values manually.
+- **asyncpg numeric codec round-trip:** inserted a balance, read it back, confirmed `Decimal(str(row["amount"]))` preserves precision through a full insert→select cycle.
+- **Hypothesis strategy bounds:** `0.01 NGN × 0.000677 USD/NGN` rounds to `0.00 USD` — the falsifying example surfaced this. Raised `min_value` to `"10.00"`.
+- **Staleness threshold in tests:** hardcoded `700` seconds was below `RATE_STALE_SECONDS=3600` in CI. Fixed to `settings.rate_stale_seconds + 60`.
+- **Alembic migration ordering:** ran `alembic upgrade head` locally before every push. Migration 002 originally referenced the `country` column before it was added in 003 — caught locally, fixed before committing.
+- **psycopg2 URL format for Alembic:** verified the `postgresql+asyncpg://` → `postgresql://` prefix substitution in the Alembic env file handles both URL forms correctly.
+- **Prometheus counters actually increment:** verified via `GET /metrics` after executing a quote — `fx_quotes_created_total` and `fx_quotes_executed_total` both showed `1.0`. Previous versions had the counters declared but never called `.inc()`.
+- **Composite index column order:** verified `(customer_id, status, created_at DESC)` supports the primary dashboard query pattern through PostgreSQL's index scan planner.
+
+---
+
+## What I Delegated to the AI and Then Reviewed
+
+- FastAPI lifespan scaffold and router registration — reviewed startup/shutdown ordering.
+- Pydantic v2 schema models — reviewed validators enforce supported currencies and positive amounts.
+- Prometheus metric registration — reviewed counter names match between declaration and increment calls, and that the histogram buckets are appropriate for sub-second API latency.
+- Hypothesis `@given` strategies — reviewed `allow_nan=False, allow_infinity=False`, and that `min_value` was appropriate per pair.
+- Docker Compose service definitions — reviewed healthcheck parameters, volume mounts, and service dependency ordering.
+- GitHub Actions workflow structure — reviewed `all-checks-pass` gate job logic.
+- SQL schema DDL — reviewed that `CHECK (amount >= 0)` is present on balances and that the partial unique index on `idempotency_key` is correct.
+- Alembic `env.py` — reviewed URL prefix handling, `psycopg2` vs `asyncpg` driver separation, and `target_metadata = None` (no ORM autogenerate).
+- Grafana dashboard JSON — reviewed PromQL queries for correctness against actual metric names.
+- RabbitMQ exchange topology — reviewed that `TOPIC` exchange type and `durable=True` are correct for the use case.
+- Redis rate cache TTL calculation — reviewed that `rate_stale_seconds + 120` buffer prevents cache expiry coinciding with the staleness window.
+- `.claude/commands/` and `.agents/skills/` content — reviewed for accuracy against the actual codebase.
+
+---
+
+## What I Rejected from the AI
+
+| Draft | Reason |
 |---|---|
-| FastAPI (async), not Flask | `asyncio.gather` concurrency tests are idiomatic; Flask's WSGI model adds noise |
-| PostgreSQL, not SQLite | `SELECT ... FOR UPDATE` requires row-level locking; SQLite cannot express it |
-| Raw `asyncpg`, no ORM | Locking semantics must be explicit; ORM-generated SQL is harder to audit in financial code |
-| Python `Decimal` everywhere | `float` arithmetic is a hard financial bug; `float(amount) * float(rate)` is the exact pattern planted in `planted_bugs/` |
-| `structlog` JSON output | Structured logs are machine-parseable; `logging.basicConfig` produces unstructured strings |
-| `prometheus_client` for metrics | Assignment requires `/metrics`; Prometheus format is the production standard |
-| `Hypothesis` for property tests | Assignment explicitly requires property-based testing |
-| Real PostgreSQL in all concurrency/atomicity tests | Mocking the DB layer cannot prove row-level locking works |
-| Conventional Commits for all messages | Reviewers will read the git history; it is a graded deliverable |
-| One feature branch per concern | Branch history must show incremental, reviewable progress |
+| `float(amount) * float(rate)` in `generate_quote` | Same bug as `planted_bugs/fx.py:60` |
+| `threading.Lock()` for execute concurrency | Invisible across OS processes; same class as `planted_bugs/fx.py:21` |
+| Rate re-fetched at execute time | Violates quote contract; same bug as `planted_bugs/fx.py:126` |
+| Idempotency check outside transaction | TOCTOU race; same class as `planted_bugs/fx.py:102` |
+| `BaseHTTPMiddleware` for observability | Creates futures on wrong event loop under concurrent load |
+| `add_logger_name` in structlog chain | `PrintLogger` has no `.name` — crashes every request |
+| `asyncio_default_fixture_loop_scope = "session"` | Fixtures on session loop, tests on function loop — asyncpg pool mismatch |
+| Shared pool for N concurrent test tasks | All `pool.acquire()` calls hit the same internal event-loop conflict |
+| ORM-based Alembic autogenerate | No SQLAlchemy models to diff against; raw SQL in migrations is clearer and auditable |
+| `run_migrations()` in the FastAPI lifespan | Migrations are a deploy-time concern, not runtime; moved to Dockerfile CMD |
+| `idx_customers_country` in migration 002 | Column doesn't exist until migration 003 — caught by running locally before committing |
+| Kafka for event publishing | Stream-processing tooling at the wrong scale; RabbitMQ is the correct fit for task-queue patterns |
+| Redis Pub/Sub for events | No message persistence — consumers miss events if offline; RabbitMQ durable exchange guarantees delivery |
 
 ---
 
-## Hard Constraints Enforced Throughout
+## One Thing the AI Got Wrong
 
-1. **`float` is never used for financial arithmetic.** Any draft that used `float()` was rejected immediately. The planted bug at `planted_bugs/fx.py:60` (`float(amount) * float(rate)`) is the canonical example of why.
+The first draft of `execute_quote` placed the idempotency key lookup **outside** the `conn.transaction()` block. This is the exact TOCTOU race described in the assignment: two concurrent retries both find no cached entry, both proceed to execute, and one receives a 500 from the UNIQUE constraint — the opposite of what idempotency guarantees.
 
-2. **Concurrency safety lives in the database.** Application-level locks (`threading.Lock`, `asyncio.Lock`) are invisible to other OS processes and workers. Every draft that proposed these was rejected in favour of `SELECT ... FOR UPDATE` inside an explicit PostgreSQL transaction.
+I caught it by reading the function structure before the transaction block started, comparing against constraint #4, and moving the lookup to be the first statement inside `async with conn.transaction()`.
 
-3. **Rate locked at quote time, never re-fetched on execute.** The first `execute_quote` draft called `_effective_rate()` again at execution time. This is the planted bug at `planted_bugs/fx.py:126–132`. Rejected: the customer's agreement is with the quoted rate, not with whatever the market does in the next 60 seconds.
-
-4. **Idempotency check runs inside the transaction.** The first draft placed the `SELECT FROM transactions WHERE idempotency_key = $1` lookup before `async with conn.transaction():`. Two concurrent retries with the same key could both find nothing, both execute, and one would receive a 500 from the UNIQUE constraint — the opposite of idempotency. Moved inside the transaction as the first statement, before the `FOR UPDATE` lock.
-
-5. **Balance rows locked in alphabetical currency order.** Without a deterministic lock order, two concurrent transactions converting USD→EUR and EUR→USD simultaneously deadlock. The `sorted([from_ccy, to_ccy])` call before the `FOR UPDATE` is load-bearing.
-
-6. **`asyncpg` numeric codec pinned to string.** Without `set_type_codec("numeric", encoder=str, decoder=str, ...)`, asyncpg's handling of PostgreSQL `NUMERIC` columns varies between versions. All numeric reads are wrapped: `Decimal(str(row["field"]))`.
-
-7. **No secrets in source.** All configuration via environment variables. `.env` is gitignored; `.env.example` is committed.
-
----
-
-## What Was Delegated to the AI
-
-The following were delegated with explicit instructions to produce working drafts, which were then reviewed before acceptance:
-
-- FastAPI lifespan scaffold (startup/shutdown hooks)
-- Pydantic v2 schema models (request/response shapes)
-- Docker Compose service definitions and health-check syntax
-- GitHub Actions workflow structure (service containers, job dependencies)
-- `structlog` processor chain configuration
-- `prometheus_client` counter/gauge registrations
-- Hypothesis `@given` strategy parameters
-- SQL schema (CREATE TABLE statements) — reviewed for constraint correctness
-- Initial `REVIEW.md` bug list structure — every finding independently verified against the source
-- `.claude/` commands and `.agents/` skill definitions
-
----
-
-## What Was Rejected from the AI
-
-Each of the following was proposed in an initial draft and explicitly rejected:
-
-| Draft | Why rejected |
-|---|---|
-| `float(amount) * float(rate)` in `generate_quote` | Same bug as `planted_bugs/fx.py:60`; introduces IEEE 754 error |
-| `threading.Lock()` for execute concurrency | Invisible to other workers; gives false confidence |
-| `_effective_rate()` called again in `execute_quote` | Violates quote contract; same bug as `planted_bugs/fx.py:126` |
-| Idempotency check outside transaction | TOCTOU race; same class of bug as `planted_bugs/fx.py:102` |
-| `BaseHTTPMiddleware` for observability | Spawns anyio task groups that create futures on the wrong event loop under concurrent load — causes `RuntimeError: Future attached to a different loop` |
-| `structlog.stdlib.add_logger_name` in processor chain | Reads `.name` from the logger; `PrintLogger` has no `.name` — crashes every request |
-| `asyncio_default_fixture_loop_scope = "session"` for test fixtures | Fixtures run on the session loop; test functions run on function loops; asyncpg pool binds to whichever loop created it — mismatch causes `InterfaceError` under concurrent tests |
-| Shared pool for concurrent test tasks | All 20 `pool.acquire()` calls on the same pool under concurrent asyncio tasks triggers the same event-loop mismatch internally — replaced with per-task mini-pools (`min_size=1, max_size=1`) |
-| `_FALLBACK_MID` keys as pair format (`"USD/EUR"`) | `_compute_all_mids()` expects currency-code keys (`"EUR"`); wrong keys cause `KeyError` at collection time |
-| Catching `FXError` in routers and re-raising as `HTTPException` | Strips `error_code` from the response — tests checking `resp.json()["error_code"]` would `KeyError` |
-| Hypothesis `min_value="0.01"` for all pairs | `0.01 NGN × 0.000677 USD/NGN = 0.0000067` rounds to `0.00` — falsifies the "always positive" property |
-| Hardcoded `700` seconds for staleness tests | `RATE_STALE_SECONDS=3600` in CI; `700 < 3600` so the test never raised — replaced with `settings.rate_stale_seconds + 60` |
-
----
-
-## Things the AI Got Wrong (caught during review)
-
-These were bugs in generated code, caught before they were committed:
-
-**1. Idempotency lookup outside the transaction** *(highest severity)*  
-The first `execute_quote` draft opened the transaction after checking the idempotency key. This is an exact TOCTOU race: two concurrent retries both see no cached row, both execute, one gets a 500. Caught by reading the function top-to-bottom and comparing against the invariant stated in the constraints.
-
-**2. `BaseHTTPMiddleware` event-loop conflict**  
-The first middleware implementation used `@app.middleware("http")` (Starlette's `BaseHTTPMiddleware`). Under concurrent load in tests, anyio's task group created futures bound to its internal loop, while asyncpg's pool was bound to asyncio's loop — producing `RuntimeError: Future attached to a different loop`. Caught by running the concurrency test locally and reading the full traceback. Fixed by replacing with a raw ASGI class (`ObservabilityMiddleware`) that wraps `send()` directly.
-
-**3. pytest-asyncio session-scoped event loop**  
-Setting `asyncio_default_fixture_loop_scope = "session"` makes fixtures use the session loop, but test *functions* still run on per-test function loops. The asyncpg pool created in a fixture was on the session loop; the test body running on a function loop saw a mismatch and produced `InterfaceError: cannot perform operation: another operation is in progress`. Caught by reproducing locally and reading asyncpg's source to understand pool loop-binding. Fixed by reverting to `asyncio_default_fixture_loop_scope = "function"` and making `db_schema` a synchronous fixture using `asyncio.run()`.
-
-**4. Rate re-fetched at execution time**  
-`execute_quote` called `self._effective_rate(row["from_currency"], row["to_currency"])` instead of using `row["rate"]`. The customer's quote is a contract for a specific rate — re-fetching it at execution time breaks that contract and introduces financial exposure. Caught by reading the execute path and comparing against the spec invariant before the function was committed.
-
----
-
-## What I Verified Before Trusting
-
-- **Spread direction:** that `buy < mid < sell` holds for every pair. Verified by running `test_snapshot_sell_gt_mid_gt_buy` and reading `_compute_all_mids` output manually.
-- **Deadlock ordering:** that PostgreSQL acquires row locks in the order rows are returned by a query with `ORDER BY`. Confirmed via PostgreSQL documentation and the `test_different_quotes_execute_concurrently_no_deadlock` test.
-- **asyncpg numeric codec round-trip:** that `Decimal(str(row["amount"]))` survives a full insert→select cycle. Verified by adding a balance, reading it back, and checking the type and value.
-- **Idempotency within the transaction:** that the lookup runs before `FOR UPDATE` and inside `conn.transaction()`. Verified by reading the function structure and checking PostgreSQL docs on transaction isolation.
-- **GitHub Actions PostgreSQL health-check:** that `pg_isready` correctly blocks the test job until the service is ready. Verified by checking CI logs after the first failing run.
-- **Hypothesis strategy bounds:** that `allow_nan=False, allow_infinity=False` and `min_value="10.00"` are necessary. `0.01 NGN` rounds to `0.00 USD` — verified the falsifying example locally before raising the bound.
-- **`ruff check` and `ruff format`:** ran both locally before every push to confirm zero lint and format errors.
-
----
-
-## CI/CD and Tooling Choices
-
-- **GitHub Actions:** Two workflows — `pr-checks.yml` (lint + tests + Docker build on every PR to `dev`, `staging`, `fx-prod`) and `test.yml` (full suite on push to any main branch). A third `production.yml` runs exclusively on `fx-prod` pushes: tests → Docker build → end-to-end smoke test (customer → credit → quote → execute) → summary gate.
-- **Branch model:** `feature/*` → `dev` → `staging` → `fx-prod`. Feature branches merged with `--no-ff` to preserve history. `fx-prod` promoted manually via GitHub PR to create an explicit production gate.
-- **Ruff:** both `ruff check` (lint) and `ruff format --check` enforced in CI. All 11 lint errors and 19 formatting issues fixed before final submission.
-- **Claude Code project config:** `.claude/settings.json` pre-approves common commands (pytest, docker compose, git) to reduce prompt friction. `.claude/commands/` provides project-specific slash commands. `.agents/skills/` contains reusable agent prompts for future contributors (add-currency-pair, add-endpoint, debug-test-failure, security-review, rate-source-swap).
-
----
-
-## Process Notes
-
-The assignment states: *"We want to see how you work with these tools, not how you'd write every line by hand."*
-
-My approach: use the AI for structural scaffolding and boilerplate, but own every invariant that touches financial correctness, concurrency safety, or the test architecture. The AI is fast at producing working first drafts; the engineer's job is to read them critically against the spec and reject anything that trades correctness for convenience.
-
-The four bugs the AI produced (idempotency outside transaction, middleware event-loop conflict, session loop mismatch, rate re-fetch) are all exactly the class of subtle, non-obvious mistakes that a code reviewer must catch — and they are structurally similar to the bugs planted in `planted_bugs/`. This is not coincidental: LLMs tend to reproduce common patterns, and common patterns in financial code often contain exactly these races and precision errors.
+This class of bug — a check-then-act race where the check and the act are in different transaction scopes — is also the root of bugs 1 and 5 in `planted_bugs/`. LLMs reproduce common patterns; common patterns in financial code contain exactly these races.
