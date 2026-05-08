@@ -1,4 +1,5 @@
 """Tests for /healthz and /metrics endpoints."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,13 @@ async def test_healthz_database_component_ok(client):
 async def test_healthz_rates_stale_shows_degraded(client, monkeypatch):
     from app.rates import rate_provider
     from app.config import settings
-    monkeypatch.setattr(rate_provider, "_fetched_at", datetime.now(timezone.utc) - timedelta(seconds=settings.rate_stale_seconds + 60))
+
+    monkeypatch.setattr(
+        rate_provider,
+        "_fetched_at",
+        datetime.now(timezone.utc)
+        - timedelta(seconds=settings.rate_stale_seconds + 60),
+    )
     resp = await client.get("/healthz")
     assert resp.json()["components"]["rates"]["status"] == "degraded"
 

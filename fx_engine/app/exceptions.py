@@ -5,6 +5,7 @@ from decimal import Decimal
 
 class FXError(Exception):
     """Base class for all FX engine errors."""
+
     status_code: int = 500
     error_code: str = "internal_error"
 

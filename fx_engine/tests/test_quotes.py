@@ -1,4 +1,5 @@
 """Tests for quote generation."""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -43,7 +44,9 @@ async def test_quote_amount_has_two_decimal_places(client, funded_customer):
     assert to_amount == to_amount.quantize(Decimal("0.01"))
 
 
-async def test_quote_rate_is_locked_at_generation_time(client, funded_customer, monkeypatch):
+async def test_quote_rate_is_locked_at_generation_time(
+    client, funded_customer, monkeypatch
+):
     """Rate stored in the quote must not change when live rates shift."""
     from app.rates import rate_provider
     from datetime import datetime, timezone
@@ -143,12 +146,23 @@ async def test_quote_rejects_unsupported_currency(client, funded_customer):
     assert resp.status_code in (400, 422)
 
 
-@pytest.mark.parametrize("pair", [
-    ("USD", "EUR"), ("USD", "KES"), ("USD", "NGN"),
-    ("EUR", "USD"), ("EUR", "KES"), ("EUR", "NGN"),
-    ("KES", "USD"), ("KES", "EUR"), ("KES", "NGN"),
-    ("NGN", "USD"), ("NGN", "EUR"), ("NGN", "KES"),
-])
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ("USD", "EUR"),
+        ("USD", "KES"),
+        ("USD", "NGN"),
+        ("EUR", "USD"),
+        ("EUR", "KES"),
+        ("EUR", "NGN"),
+        ("KES", "USD"),
+        ("KES", "EUR"),
+        ("KES", "NGN"),
+        ("NGN", "USD"),
+        ("NGN", "EUR"),
+        ("NGN", "KES"),
+    ],
+)
 async def test_all_pairs_produce_positive_quote(client, funded_customer, pair):
     from_ccy, to_ccy = pair
     # Credit the from_currency so the customer has it

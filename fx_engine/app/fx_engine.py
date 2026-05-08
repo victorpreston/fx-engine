@@ -11,6 +11,7 @@ precision; the final to_amount is quantized to 2 decimal places
 stored in the quotes table and reused at execution time — the rate is
 never re-fetched on execute.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -118,7 +119,6 @@ async def execute_quote(
     """
     async with pool.acquire() as conn:
         async with conn.transaction():
-
             # ── 1. Idempotency: return cached response if key was seen ──────
             if idempotency_key:
                 existing = await conn.fetchrow(

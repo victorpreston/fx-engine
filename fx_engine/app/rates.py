@@ -1,4 +1,5 @@
 """Rate provider — fetches live rates, applies spreads, handles staleness."""
+
 from __future__ import annotations
 
 import asyncio

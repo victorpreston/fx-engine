@@ -8,6 +8,7 @@ These tests verify:
    larger to_amount (no rounding discontinuities for the same pair).
 4. Cross-pair rates are consistent with their component legs.
 """
+
 from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
@@ -37,8 +38,15 @@ def compute_to_amount(from_amount: Decimal, pair: str) -> Decimal:
 
 # ── Property tests ────────────────────────────────────────────────────────────
 
+
 @given(
-    amount=st.decimals(min_value="0.01", max_value="10000000", places=2, allow_nan=False, allow_infinity=False),
+    amount=st.decimals(
+        min_value="0.01",
+        max_value="10000000",
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
     pair=st.sampled_from(SUPPORTED_PAIRS),
 )
 @hyp_settings(max_examples=500)
@@ -52,7 +60,13 @@ def test_to_amount_has_at_most_two_decimal_places(amount, pair):
 @given(
     # min_value=10.00 ensures the lowest-rate pair (NGN/USD ≈ 0.00067)
     # produces to_amount >= 0.0067, which rounds to 0.01 — always positive.
-    amount=st.decimals(min_value="10.00", max_value="10000000", places=2, allow_nan=False, allow_infinity=False),
+    amount=st.decimals(
+        min_value="10.00",
+        max_value="10000000",
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
     pair=st.sampled_from(SUPPORTED_PAIRS),
 )
 @hyp_settings(max_examples=500)
@@ -62,8 +76,16 @@ def test_to_amount_is_always_positive(amount, pair):
 
 
 @given(
-    a=st.decimals(min_value="1", max_value="1000", places=2, allow_nan=False, allow_infinity=False),
-    b=st.decimals(min_value="1001", max_value="10000", places=2, allow_nan=False, allow_infinity=False),
+    a=st.decimals(
+        min_value="1", max_value="1000", places=2, allow_nan=False, allow_infinity=False
+    ),
+    b=st.decimals(
+        min_value="1001",
+        max_value="10000",
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
     pair=st.sampled_from(SUPPORTED_PAIRS),
 )
 @hyp_settings(max_examples=300)
@@ -78,7 +100,13 @@ def test_larger_from_amount_yields_larger_to_amount(a, b, pair):
 
 
 @given(
-    amount=st.decimals(min_value="0.01", max_value="1000000", places=2, allow_nan=False, allow_infinity=False),
+    amount=st.decimals(
+        min_value="0.01",
+        max_value="1000000",
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
 )
 @hyp_settings(max_examples=300)
 def test_usd_kes_rate_worse_than_mid(amount):
@@ -92,7 +120,13 @@ def test_usd_kes_rate_worse_than_mid(amount):
 
 
 @given(
-    amount=st.decimals(min_value="1", max_value="100000", places=2, allow_nan=False, allow_infinity=False),
+    amount=st.decimals(
+        min_value="1",
+        max_value="100000",
+        places=2,
+        allow_nan=False,
+        allow_infinity=False,
+    ),
 )
 @hyp_settings(max_examples=200)
 def test_cross_pair_rate_is_consistent_with_legs(amount):
