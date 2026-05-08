@@ -54,28 +54,20 @@ The original single-column `idx_quotes_customer` was dropped — it's subsumed b
 **Why:** Simpler and less error-prone than maintaining separate buy/sell rate tables and choosing the correct side per conversion direction. The economics are identical.  
 **Trade-off:** The `/rates` snapshot shows buy/sell/mid for transparency, but the bid-ask framing is cosmetic.
 
-### `monitoring/` Folder for Observability Configs
-**Decision (mine):** `monitoring/prometheus/prometheus.yml` and `monitoring/grafana/` over bare `prometheus.yml` at root and `grafana/` as a top-level folder.  
-**Why:** A folder named after a tool (`grafana/`) exposes an implementation detail rather than a concept. `monitoring/` names the concern. A reviewer sees `monitoring/` and immediately knows this is where operational configuration lives, regardless of which specific tools are used. Swapping Grafana for another dashboard tool in the future only changes what's inside `monitoring/`, not the folder name.  
-**Trade-off:** One extra level of nesting for `prometheus.yml` (`monitoring/prometheus/prometheus.yml`). Worth it for conceptual clarity.
+### Redis for Shared Rate Cache
+**Decision (mine):** Redis as a distributed rate cache across all API workers.  
+**Why:** The `RateProvider` keeps an in-memory dict for zero-latency reads. With a single worker this is fine. With multiple workers each refreshes independently from the live API — they diverge slightly in timing, serve different rates to the same customer depending on which worker handles the request, and all hit the external API in parallel. Redis fixes this: on every successful refresh, one worker writes the 12 mid-rates to a `fx:rates:mids` key. Other workers, on startup or after a failed API call, read from Redis rather than hitting the live API. Rates stay consistent across the fleet.  
+**Failure mode:** If Redis is unavailable, `RateProvider` falls back to its in-memory cache (or seed data on first start). Redis is not in the critical path — a Redis outage degrades but does not break FX operations.  
+**TTL:** The Redis key TTL is set to `rate_stale_seconds + 120` (stale threshold + 2-minute buffer). This ensures the cache outlives the staleness window — workers can read stale-but-valid rates from Redis while a refresh is in flight, rather than all hammering the API simultaneously.  
+**Trade-off:** Redis adds an infrastructure dependency. The benefit — rate consistency across workers — only matters at scale. For a single-worker deployment it's unnecessary. Acceptable: the assignment targets production-readiness, and production means multiple workers.
 
-### App Folder Structure — `models/`, `routes/`, `engine/`, `providers/`, `services/`
-**Decision (mine):** Five clearly-named top-level directories inside `app/`, each with an unambiguous responsibility.  
-**Why each name was chosen:**
-
-| Folder | Rule | What's inside |
-|---|---|---|
-| `models/` | What data looks like | Pydantic schemas split by domain (customer, quote, transaction, shared) |
-| `routes/` | How requests arrive | HTTP transport only — thin, delegates to engine/services |
-| `engine/` | What the system does | FX business logic: generate_quote, execute_quote |
-| `providers/` | External data we pull | RateProvider calls a third-party exchange rate API |
-| `services/` | Infrastructure we own | Database pool, Redis, RabbitMQ, Prometheus |
-
-**The key distinction: `providers/` vs `services/`**  
-`RateProvider` was initially in `services/`. That's wrong. A service adapter is something we control (our PostgreSQL, our Redis). A provider is an external data source we depend on (exchangeratesapi.io). Moving `rates.py` to `providers/` communicates this ownership boundary explicitly. When exchangeratesapi.io's API changes, you look in `providers/`. When the database pool needs tuning, you look in `services/`.
-
-**Why not feature-based (e.g. `quotes/`, `customers/`)?**  
-Feature folders make sense when each feature has its own models, routes, and service logic. Here, all business logic lives in one place (`engine/fx.py`) because the execute path crosses both quote and balance domains — splitting by feature would require either duplication or circular imports.
+### RabbitMQ for Event Publishing
+**Decision (mine):** RabbitMQ with a durable topic exchange (`fx.events`) over Redis Pub/Sub, Kafka, or direct HTTP webhooks.  
+**Why RabbitMQ over Kafka:** Kafka is designed for millions of events per second with multiple independent consumer groups replaying the same stream. Umba's FX volume is thousands of transactions per day — Kafka would be over-engineering. RabbitMQ is designed for exactly the use cases here: "quote executed → notify customer", "quote expired → trigger audit", "quote created → update ledger". These are task-queue and routing patterns, not stream-processing patterns. RabbitMQ's management UI (port 15672) also gives immediate visibility into message flow during development.  
+**Why RabbitMQ over Redis Pub/Sub:** Redis Pub/Sub is fire-and-forget with no persistence — if a consumer is offline when the event is published, the message is lost. RabbitMQ persists messages (durable exchange + persistent delivery mode) and supports dead-letter queues for retry on consumer failure.  
+**Topic exchange with routing keys:** Using `TOPIC` exchange type with routing keys `quote.created`, `quote.executed`, `quote.expired` means any number of consumers can bind to the exchange with different patterns (`quote.*` for all, `quote.executed` for just transactions). No code changes are needed to add a new consumer.  
+**Fire-and-forget pattern:** Publishing happens after the database transaction commits, never inside it. If the publish fails (broker offline, network error), the event is logged and dropped — the FX operation has already committed and must not be rolled back. In production, the Outbox pattern would guarantee delivery: write events to a DB table inside the transaction, relay to RabbitMQ via a separate process. This is documented as future work.  
+**Trade-off:** Events can be lost if RabbitMQ is down at publish time. Acceptable for this scope given the Outbox pattern is the documented next step.
 
 ---
 
@@ -89,9 +81,10 @@ Feature folders make sense when each feature has its own models, routes, and ser
 | Migration as deploy step (not runtime) | Me |
 | `db/` folder naming | Me |
 | Composite index selection and rationale | Me |
-| `monitoring/` folder naming over `grafana/` | Me |
-| `models/routes/engine/providers/services` structure | Me |
-| `providers/` vs `services/` distinction | Me |
+| Redis for shared rate cache | Me |
+| RabbitMQ over Kafka / Redis Pub/Sub | Me |
+| Fire-and-forget event publishing (after commit, not inside) | Me |
+| Redis TTL = stale_seconds + 120s buffer | Me |
 | Idempotency inside transaction | Me (caught AI's initial mistake) |
 | Deadlock ordering (alphabetical currency) | Me |
 | Rate pre-computation strategy | Me |
@@ -113,8 +106,11 @@ Feature folders make sense when each feature has its own models, routes, and ser
 5. **`BaseHTTPMiddleware` for observability.** Spawns anyio task groups that bind futures to a different event loop than asyncpg's pool. Replaced with a raw ASGI class.
 6. **`asyncio_default_fixture_loop_scope = "session"` globally.** Fixtures run on the session loop, test functions run on function loops — asyncpg pool mismatch. Reverted to function scope.
 7. **Placing `idx_customers_country` in migration 002.** That column doesn't exist until migration 003. Caught by running `alembic upgrade head` locally — the index creation failed. Moved to 003.
-8. **`grafana/` as a top-level folder.** Names a tool, not a concept. Renamed to `monitoring/`.
-9. **All schemas in one `schemas.py` file.** Split into `models/customer.py`, `models/quote.py`, `models/transaction.py`, `models/shared.py` — each domain in its own file.
+8. **Kafka for event publishing.** Kafka is stream processing at millions of events per second — over-engineering for Umba's FX volume. RabbitMQ is the correct tool for task-queue and routing patterns at this scale.
+9. **Redis Pub/Sub for events.** No persistence — messages are lost if a consumer is offline. RabbitMQ with durable exchange and persistent delivery guarantees messages survive consumer restarts.
+10. **Publishing inside the database transaction.** If publish fails, the event would trigger a rollback of an already-correct financial operation. Events publish after commit, fire-and-forget.
+11. **`grafana/` as a top-level folder.** Names a tool, not a concept. Renamed to `monitoring/`.
+12. **All schemas in one `schemas.py` file.** Split into `models/customer.py`, `models/quote.py`, `models/transaction.py`, `models/shared.py` — each domain in its own file.
 
 ---
 
