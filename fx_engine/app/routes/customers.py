@@ -20,6 +20,14 @@ router = APIRouter(prefix="/customers", tags=["customers"])
 log = structlog.get_logger(__name__)
 
 
+@router.get("", response_model=list[CustomerResponse])
+async def list_customers(
+    conn: asyncpg.Connection = Depends(get_connection),
+):
+    rows = await conn.fetch("SELECT * FROM customers ORDER BY created_at DESC")
+    return [dict(r) for r in rows]
+
+
 @router.post("", response_model=CustomerResponse, status_code=201)
 async def create_customer(
     body: CustomerCreate,
@@ -115,6 +123,7 @@ async def get_balances(
     }
 
 
+@router.post("/{customer_id}/credit", response_model=BalanceItem, status_code=200)
 @router.post(
     "/{customer_id}/balances/credit", response_model=BalanceItem, status_code=200
 )

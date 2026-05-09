@@ -1,4 +1,4 @@
-"""Tests for quote generation."""
+"""Tests for quote generation, listing, and retrieval."""
 
 from __future__ import annotations
 
@@ -80,6 +80,91 @@ async def test_quote_rate_is_locked_at_generation_time(
     tx = exec_resp.json()
     assert tx["rate"] == quoted_rate
     assert tx["to_amount"] == quoted_to_amount
+
+
+async def test_list_quotes_empty(client):
+    resp = await client.get("/quotes")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_list_quotes_returns_created_quote(client, funded_customer):
+    create = await client.post(
+        "/quotes",
+        json={
+            "customer_id": funded_customer["id"],
+            "from_currency": "USD",
+            "to_currency": "KES",
+            "amount": "100.00",
+        },
+    )
+    assert create.status_code == 201
+    quote_id = create.json()["quote_id"]
+
+    resp = await client.get("/quotes")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["quote_id"] == quote_id
+
+
+async def test_list_quotes_filter_by_customer_id(client):
+    r1 = await client.post(
+        "/customers", json={"name": "Quote C1", "email": "qc1@test.example"}
+    )
+    r2 = await client.post(
+        "/customers", json={"name": "Quote C2", "email": "qc2@test.example"}
+    )
+    c1, c2 = r1.json(), r2.json()
+
+    for c in (c1, c2):
+        await client.post(
+            f"/customers/{c['id']}/balances/credit",
+            json={"currency": "USD", "amount": "500.00"},
+        )
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": c["id"],
+                "from_currency": "USD",
+                "to_currency": "EUR",
+                "amount": "50.00",
+            },
+        )
+
+    resp = await client.get(f"/quotes?customer_id={c1['id']}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["customer_id"] == c1["id"]
+
+
+async def test_get_quote_by_id(client, funded_customer):
+    create = await client.post(
+        "/quotes",
+        json={
+            "customer_id": funded_customer["id"],
+            "from_currency": "USD",
+            "to_currency": "EUR",
+            "amount": "200.00",
+        },
+    )
+    assert create.status_code == 201
+    quote_id = create.json()["quote_id"]
+
+    resp = await client.get(f"/quotes/{quote_id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["quote_id"] == quote_id
+    assert data["customer_id"] == funded_customer["id"]
+    assert data["from_currency"] == "USD"
+    assert data["to_currency"] == "EUR"
+    assert Decimal(data["from_amount"]) == Decimal("200.00")
+
+
+async def test_get_quote_not_found(client):
+    resp = await client.get("/quotes/00000000-0000-0000-0000-000000000000")
+    assert resp.status_code == 404
 
 
 async def test_quote_rejects_same_currency(client, funded_customer):
