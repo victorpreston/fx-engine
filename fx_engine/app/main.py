@@ -23,7 +23,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.config import settings
 from app.exceptions import FXError
 from app.providers.rates import rate_provider
-from app.routes import customers, health, quotes
+from app.routes import customers, health, quotes, transactions
 from app.routes import rates as rates_router
 from app.services.cache import close_redis, get_redis
 from app.services.database import close_pool, get_pool
@@ -177,5 +177,6 @@ async def unhandled_error_handler(request: Request, exc: Exception) -> JSONRespo
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(quotes.router)
 app.include_router(customers.router)
+app.include_router(transactions.router)
 app.include_router(rates_router.router)
 app.include_router(health.router)

@@ -158,17 +158,23 @@ Balance rows are locked in ascending alphabetical order by currency code (`EUR` 
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/healthz` | DB + rates health check |
+| GET | `/metrics` | Prometheus-format metrics |
 | POST | `/customers` | Create customer (accepts `phone`, `country`) |
+| GET | `/customers` | List all customers |
 | GET | `/customers/{id}` | Get customer |
 | PATCH | `/customers/{id}/kyc` | Update KYC status (`pending`/`verified`/`rejected`) |
 | GET | `/customers/{id}/balances` | List all currency balances |
-| POST | `/customers/{id}/balances/credit` | Internal fixture: credit a balance |
+| POST | `/customers/{id}/credit` | Internal fixture: credit a balance |
 | POST | `/quotes` | Generate FX quote (accepts optional `reference`) |
+| GET | `/quotes` | List all quotes (filter by `?customer_id=`) |
+| GET | `/quotes/{id}` | Get single quote |
 | POST | `/quotes/{id}/execute` | Execute quote atomically |
+| GET | `/transactions` | List all transactions (filter by `?customer_id=`) |
+| GET | `/transactions/{id}` | Get single transaction |
 | GET | `/rates` | Current rates with buy/sell/mid for all 12 pairs |
 | POST | `/rates/refresh` | Force rate refresh from upstream API |
-| GET | `/healthz` | DB + rates health check |
-| GET | `/metrics` | Prometheus-format metrics |
+| GET | `/docs` | Swagger UI — interactive testing (development mode only) |
 
 ---
 
