@@ -4,8 +4,7 @@ A production-quality foreign exchange API supporting USD, EUR, KES, and NGN with
 
 ## Architecture at a Glance
 
-![FX Engine Architecture — FastAPI · PostgreSQL · Redis · RabbitMQ · Grafana](image.png)
-
+![FX Engine Architecture — FastAPI · PostgreSQL · Redis · RabbitMQ · Grafana](docs/architecture.png)
 
 ## Stack
 
@@ -293,7 +292,9 @@ fx_takehome/
 ├── AGENTS.md                   # Agent instructions used during development
 ├── REVIEW.md                   # Code review findings for planted_bugs/
 ├── ASSIGNMENT.md               # Original assignment brief
-├── image.png                   # Architecture diagram
+├── docs/
+│   ├── architecture.png        # Local Docker Compose architecture diagram
+│   └── proposed-production-setup.png
 ├── planted_bugs/               # AI-generated baseline code (Part 3 review target)
 └── fx_engine/                  # Production API — all active development lives here
     ├── Dockerfile
@@ -385,6 +386,13 @@ fx_takehome/
 6. **Per-customer FX limits** — `daily_limit_usd` on the customer table, enforced in `execute_quote`. Required by CBK microfinance regulation for transaction limits per customer tier.
 7. **KYC enforcement on execute** — reject execute if `kyc_status != 'verified'`. Field and constraint exist; enforcement waits on the auth layer.
 8. **Per-customer spread tiers** — `tier` column (`standard`/`premium`), tighter spreads for premium accounts. `get_effective_rate()` already accepts a spread parameter — wiring in customer tier is a small change with direct revenue impact.
+
+
+## Proposed Production Setup
+
+The submitted project runs locally with Docker Compose. For a production AWS deployment, I would adapt the same architecture into the setup below: ECS Fargate across private subnets, ALB ingress, RDS PostgreSQL Multi-AZ, ElastiCache Redis, managed queueing/workers, Secrets Manager, and CloudWatch/X-Ray observability.
+
+![FX Engine Proposed Production Setup](docs/proposed-production-setup.png)
 
 
 ## Time Budget
