@@ -1,6 +1,8 @@
 # FX Engine
 
-A production-quality foreign exchange API supporting USD, EUR, KES, and NGN with per-customer balance accounts, KYC tracking, event publishing, and live observability. Built with FastAPI, PostgreSQL, asyncpg, Redis, RabbitMQ, and Prometheus/Grafana.
+FX engine for USD, EUR, KES, and NGN — quotes, atomic execution, per-customer balances, and live rates with spread. Built as the take-home for the Umba Senior Backend Engineer role.
+
+Process artifacts: [`SPEC.md`](SPEC.md) · [`DECISIONS.md`](DECISIONS.md) · [`AGENTS.md`](AGENTS.md) · [`REVIEW.md`](REVIEW.md)
 
 ## Architecture at a Glance
 
@@ -104,13 +106,13 @@ TEST_DATABASE_URL=postgresql://fx_test:fx_test_secret@localhost:5433/fx_test_db 
 | File | What it covers |
 |---|---|
 | `test_quotes.py` | Quote generation for all 12 pairs, rate lock at generation time, validation |
-| `test_execute.py` | Atomic two-leg balance update, expiry, insufficient funds, cross-customer isolation |
+| `test_execute.py` | Atomic two-leg balance update; `_after_debit_hook` rollback proof; ledger invariant; expiry; insufficient funds |
 | `test_concurrency.py` | N concurrent executes on the same quote → exactly 1 succeeds (SELECT FOR UPDATE proof) |
-| `test_idempotency.py` | Retry safety, concurrent retries with same key produce exactly one DB write |
+| `test_idempotency.py` | Required key (400 without), same-key replay, different-payload 409, concurrent retries write exactly one row |
 | `test_precision.py` | Hypothesis property tests — 500 examples per pair, monotonicity, spread direction |
 | `test_rates.py` | Staleness detection, Redis fallback, refresh failure handling, spread correctness |
 | `test_customers.py` | CRUD, KYC status update, balance credit and accumulation |
-| `test_health.py` | `/healthz` component status, `/metrics` Prometheus counter presence |
+| `test_health.py` | `/healthz` liveness-only; `/readyz` stale-rates 503; `/metrics` Prometheus format |
 
 ### Concurrency test proof
 
@@ -130,7 +132,8 @@ test_concurrent_execute_balance_debited_exactly_once:
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/healthz` | DB + rate freshness health check |
+| `GET` | `/healthz` | Process liveness only |
+| `GET` | `/readyz` | DB reachable + rates fresh — readiness for quote traffic |
 | `GET` | `/metrics` | Prometheus counters and latency histogram |
 | `POST` | `/customers` | Create customer — accepts `name`, `email`, `phone`, `country` |
 | `GET` | `/customers` | List all customers |
@@ -249,8 +252,14 @@ curl http://localhost:8000/rates
 # Force rate refresh from upstream API
 curl -X POST http://localhost:8000/rates/refresh
 
-# Health check
+# Process liveness (no DB or rate check — load balancer probe)
 curl http://localhost:8000/healthz
+# {"status": "ok"}
+
+# Readiness for quote traffic (DB reachable + rates fresh)
+curl http://localhost:8000/readyz
+# {"status": "ready", "database": "ok", "rates": "ok"}
+# → 503 {"status": "not_ready", ...} if rates are stale or DB is down
 
 # Prometheus metrics
 curl http://localhost:8000/metrics
@@ -339,7 +348,8 @@ fx_takehome/
     │   └── versions/
     │       ├── be56cd133310    # Initial schema: customers, balances, quotes, transactions, rate_snapshots
     │       ├── 1076c0e1bb3f    # Compound indexes for common query patterns
-    │       └── aadaaac35570    # Customer enrichment (phone, country, kyc_status) + quote audit fields
+    │       ├── aadaaac35570    # Customer enrichment (phone, country, kyc_status) + quote audit fields
+    │       └── c4f1a2b3d8e9    # ledger_entries (append-only double-entry) + idempotency_keys table
     │
     ├── tests/
     │   ├── conftest.py         # Fixtures: client, customer, funded_customer, pending_quote
@@ -367,12 +377,13 @@ fx_takehome/
 
 ## Known Limitations
 
-- No authentication or authorization (out of scope per assignment). The `/customers/{id}/credit` and `/customers/{id}/kyc` endpoints are unprotected.
-- Rate source is `v6.exchangerate-api.com` with the provided API key. Key is read from `RATE_API_KEY` environment variable — never committed to the repository.
-- KYC status is stored and updatable but not enforced on execute. Enforcement requires an auth layer to identify the caller.
-- `rate_snapshots` table exists for full rate audit history but is not written to on refresh. Each rate object currently stores `mid_rate` at quote generation time for per-quote auditability.
-- Outbox pattern not implemented for RabbitMQ — events are fire-and-forget after commit. Under a broker outage, events can be lost. The Outbox pattern (write event to DB table in the same transaction, relay via a separate process) is the production next step.
-- Single-region deployment; no cross-region consistency guarantees.
+- **No authentication or authorization** (out of scope per assignment). The `/customers/{id}/credit` and `/customers/{id}/kyc` endpoints are unprotected.
+- **Rate source** is `v6.exchangerate-api.com`. Key is read from `RATE_API_KEY` — never committed.
+- **KYC enforcement** on execute is deferred. The `kyc_status` field and constraint exist; enforcement requires an auth layer to identify the caller.
+- **Ledger model:** `ledger_entries` is append-only and is the source of truth; `balances` is a materialized cache. A `balance == SUM(credits) − SUM(debits)` reconciliation test runs after every money-moving operation. DB-level immutability triggers on audit tables (ledger_entries, rate_snapshots) would be the next hardening step.
+- **Outbox pattern** not implemented for RabbitMQ — events are fire-and-forget after commit. Under a broker outage, events can be lost. The Outbox pattern is the production next step.
+- **Idempotency key retention:** keys are retained indefinitely. Production needs an `expires_at` column and a periodic cleanup job (24–72 h).
+- **Single-region deployment;** no cross-region consistency guarantees.
 - `/docs` and `/redoc` are disabled when `ENVIRONMENT=production`.
 
 
@@ -397,9 +408,13 @@ The submitted project runs locally with Docker Compose. For a production AWS dep
 
 ## Time Budget
 
-- Architecture design and spec writing: ~1 hour
-- Core implementation (engine, routes, tests): ~5 hours
-- Production hardening (Redis, RabbitMQ, Grafana, Alembic, schema enrichment): ~4 hours
-- Code review (`planted_bugs/`): ~1.5 hours
-- Documentation (SPEC, DECISIONS, AGENTS, README): ~1.5 hours
-- Total wall-clock: ~14 hours across 2 days
+Active engagement across three days, done around a full-time role — some context-switching between sessions.
+
+| Session | Date | Focus |
+|---------|------|-------|
+| Session 1 | 08 May 2026 | Spec writing, schema design, initial migrations, core engine (`generate_quote`, `execute_quote`) |
+| Session 2 | 09 May 2026 | Routes, tests, concurrency proof, idempotency, Hypothesis property tests, `planted_bugs/` review |
+| Session 3 | 10 May 2026 | Production hardening (Redis, RabbitMQ, Grafana), ledger model, idempotency upgrade, final documentation |
+
+**Active-engagement time:** ~7 hours across 3 days.  
+**Wall-clock span:** 08–10 May 2026 (3 calendar days).
