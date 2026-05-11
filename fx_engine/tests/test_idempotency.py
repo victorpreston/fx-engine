@@ -17,6 +17,7 @@ import pytest
 
 from app.config import settings
 from app.engine import fx
+from app.engine.fx import _EXECUTE_ENDPOINT, _request_hash
 from app.services.database import get_pool, set_type_codecs
 
 
@@ -196,7 +197,9 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
     assert count == 1, f"Expected 1 transaction row, found {count}"
 
 
-async def test_in_flight_key_returns_execution_in_progress(funded_customer, pending_quote):
+async def test_in_flight_key_returns_execution_in_progress(
+    funded_customer, pending_quote
+):
     """A key with completed_at=NULL (in-flight or failed mid-execute) must return 409
     execution_in_progress rather than racing to execute a second time."""
     from app.exceptions import ExecutionInProgressError
@@ -220,7 +223,6 @@ async def test_in_flight_key_returns_execution_in_progress(funded_customer, pend
     # To match, we need to insert with the actual hash. Re-insert with correct hash.
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM idempotency_keys WHERE key = $1", key)
-        from app.engine.fx import _request_hash, _EXECUTE_ENDPOINT
         real_hash = _request_hash(pending_quote["quote_id"], funded_customer["id"])
         await conn.execute(
             """
@@ -241,7 +243,9 @@ async def test_in_flight_key_returns_execution_in_progress(funded_customer, pend
         )
 
 
-async def test_missing_idempotency_key_returns_400(client, funded_customer, pending_quote):
+async def test_missing_idempotency_key_returns_400(
+    client, funded_customer, pending_quote
+):
     """Idempotency-Key is required on execute; omitting it must return 400."""
     resp = await client.post(
         f"/quotes/{pending_quote['quote_id']}/execute",
@@ -259,24 +263,28 @@ async def test_same_key_different_quote_returns_409(client, funded_customer):
         f"/customers/{funded_customer['id']}/balances/credit",
         json={"currency": "USD", "amount": "500.00"},
     )
-    q1 = (await client.post(
-        "/quotes",
-        json={
-            "customer_id": funded_customer["id"],
-            "from_currency": "USD",
-            "to_currency": "EUR",
-            "amount": "50.00",
-        },
-    )).json()
-    q2 = (await client.post(
-        "/quotes",
-        json={
-            "customer_id": funded_customer["id"],
-            "from_currency": "USD",
-            "to_currency": "KES",
-            "amount": "50.00",
-        },
-    )).json()
+    q1 = (
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": funded_customer["id"],
+                "from_currency": "USD",
+                "to_currency": "EUR",
+                "amount": "50.00",
+            },
+        )
+    ).json()
+    q2 = (
+        await client.post(
+            "/quotes",
+            json={
+                "customer_id": funded_customer["id"],
+                "from_currency": "USD",
+                "to_currency": "KES",
+                "amount": "50.00",
+            },
+        )
+    ).json()
 
     shared_key = str(uuid.uuid4())
 

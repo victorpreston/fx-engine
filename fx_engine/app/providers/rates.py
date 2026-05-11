@@ -199,11 +199,11 @@ class RateProvider:
             await cache_rates(self._mids)
             await self._persist_snapshot(self._mids, self._fetched_at)
 
-
     async def _persist_snapshot(self, mids: dict, fetched_at: datetime) -> None:
         """Write one rate_snapshots row per pair after a successful refresh."""
         try:
             from app.services.database import get_pool
+
             pool = await get_pool()
             async with pool.acquire() as conn:
                 async with conn.transaction():

@@ -230,7 +230,11 @@ async def test_atomicity_rollback_via_hook(funded_customer, pending_quote, monke
     import app.engine.fx as fx_module
     from app.services.database import get_pool
 
-    monkeypatch.setattr(fx_module, "_after_debit_hook", lambda: (_ for _ in ()).throw(RuntimeError("injected mid-execute failure")))
+    monkeypatch.setattr(
+        fx_module,
+        "_after_debit_hook",
+        lambda: (_ for _ in ()).throw(RuntimeError("injected mid-execute failure")),
+    )
 
     pool = await get_pool()
     customer_id = funded_customer["id"]
@@ -275,7 +279,9 @@ async def test_atomicity_rollback_via_hook(funded_customer, pending_quote, monke
             "SELECT COUNT(*) FROM ledger_entries WHERE customer_id = $1 AND reference_type = 'execution'",
             customer_id,
         )
-        assert ledger_count == 0, f"Expected 0 execution ledger rows, found {ledger_count}"
+        assert ledger_count == 0, (
+            f"Expected 0 execution ledger rows, found {ledger_count}"
+        )
 
         # Quote is still pending.
         status = await conn.fetchval(
