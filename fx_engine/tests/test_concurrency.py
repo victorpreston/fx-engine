@@ -21,6 +21,7 @@ in production.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from decimal import Decimal
 
 import asyncpg
@@ -63,6 +64,7 @@ async def test_concurrent_execute_only_one_succeeds(funded_customer, pending_quo
                     pool=pool,
                     customer_id=customer_id,
                     quote_id=quote_id,
+                    idempotency_key=str(uuid.uuid4()),
                 )
                 for pool in pools
             ],
@@ -125,6 +127,7 @@ async def test_concurrent_execute_balance_debited_exactly_once(client, funded_cu
                     pool=pool,
                     customer_id=funded_customer["id"],
                     quote_id=quote_id,
+                    idempotency_key=str(uuid.uuid4()),
                 )
                 for pool in pools
             ],
@@ -186,10 +189,16 @@ async def test_different_quotes_execute_concurrently_no_deadlock(
     try:
         r1, r2 = await asyncio.gather(
             fx.execute_quote(
-                pool=p1, customer_id=funded_customer["id"], quote_id=q1["quote_id"]
+                pool=p1,
+                customer_id=funded_customer["id"],
+                quote_id=q1["quote_id"],
+                idempotency_key=str(uuid.uuid4()),
             ),
             fx.execute_quote(
-                pool=p2, customer_id=funded_customer["id"], quote_id=q2["quote_id"]
+                pool=p2,
+                customer_id=funded_customer["id"],
+                quote_id=q2["quote_id"],
+                idempotency_key=str(uuid.uuid4()),
             ),
             return_exceptions=True,
         )

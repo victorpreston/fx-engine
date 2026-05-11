@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -11,6 +12,7 @@ async def _execute_quote(client, funded_customer, pending_quote) -> dict:
     resp = await client.post(
         f"/quotes/{pending_quote['quote_id']}/execute",
         json={"customer_id": funded_customer["id"]},
+        headers={"Idempotency-Key": str(uuid.uuid4())},
     )
     assert resp.status_code == 200, resp.text
     return resp.json()
@@ -83,6 +85,7 @@ async def test_list_transactions_filter_by_customer_id(client):
         await client.post(
             f"/quotes/{q.json()['quote_id']}/execute",
             json={"customer_id": customer["id"]},
+            headers={"Idempotency-Key": str(uuid.uuid4())},
         )
 
     resp = await client.get(f"/transactions?customer_id={c1['id']}")
@@ -124,6 +127,7 @@ async def test_list_transactions_ordered_most_recent_first(client):
         ex = await client.post(
             f"/quotes/{q.json()['quote_id']}/execute",
             json={"customer_id": cid},
+            headers={"Idempotency-Key": str(uuid.uuid4())},
         )
         tx_ids.append(ex.json()["transaction_id"])
 

@@ -71,10 +71,13 @@ async def test_quote_rate_is_locked_at_generation_time(
     monkeypatch.setattr(rate_provider, "_fetched_at", datetime.now(timezone.utc))
 
     # Execute uses stored rate — to_amount should not change.
+    import uuid as _uuid
+
     quote_id = resp.json()["quote_id"]
     exec_resp = await client.post(
         f"/quotes/{quote_id}/execute",
         json={"customer_id": funded_customer["id"]},
+        headers={"Idempotency-Key": str(_uuid.uuid4())},
     )
     assert exec_resp.status_code == 200
     tx = exec_resp.json()

@@ -197,6 +197,29 @@ class RateProvider:
             log.info("rates refreshed", pairs=len(self._mids), source="api")
             rate_fetch_success.inc()
             await cache_rates(self._mids)
+            await self._persist_snapshot(self._mids, self._fetched_at)
+
+    async def _persist_snapshot(self, mids: dict, fetched_at: datetime) -> None:
+        """Write one rate_snapshots row per pair after a successful refresh."""
+        try:
+            from app.services.database import get_pool
+
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    for pair, mid_rate in mids.items():
+                        await conn.execute(
+                            """
+                            INSERT INTO rate_snapshots (pair, mid_rate, source, fetched_at)
+                            VALUES ($1, $2, 'api', $3)
+                            """,
+                            pair,
+                            str(mid_rate),
+                            fetched_at,
+                        )
+            log.info("rate_snapshot_persisted", pairs=len(mids))
+        except Exception as exc:
+            log.warning("rate_snapshot_persist_failed", error=str(exc))
 
 
 rate_provider = RateProvider()

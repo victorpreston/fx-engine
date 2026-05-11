@@ -74,3 +74,31 @@ class UnsupportedCurrencyPairError(FXError):
 class InvalidAmountError(FXError):
     status_code = 400
     error_code = "invalid_amount"
+
+
+class IdempotencyKeyRequiredError(FXError):
+    status_code = 400
+    error_code = "idempotency_key_missing"
+
+    def __init__(self) -> None:
+        super().__init__("Idempotency-Key header is required for execute")
+
+
+class IdempotencyConflictError(FXError):
+    status_code = 409
+    error_code = "idempotency_conflict"
+
+    def __init__(self, key: str) -> None:
+        super().__init__(
+            f"Idempotency-Key '{key}' was already used with a different request payload"
+        )
+
+
+class ExecutionInProgressError(FXError):
+    status_code = 409
+    error_code = "execution_in_progress"
+
+    def __init__(self, key: str) -> None:
+        super().__init__(
+            f"A request with Idempotency-Key '{key}' is already in progress — retry shortly"
+        )
