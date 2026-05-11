@@ -116,3 +116,30 @@ def test_all_12_pairs_covered():
         for b in currencies:
             if a != b:
                 assert f"{a}/{b}" in mids, f"Missing pair {a}/{b}"
+
+
+async def test_refresh_writes_rate_snapshots(provider):
+    """A successful refresh must persist 12 rows to rate_snapshots."""
+    from app.services.database import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        before_count = await conn.fetchval("SELECT COUNT(*) FROM rate_snapshots")
+
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "conversion_rates": {"EUR": 0.91, "KES": 130.5, "NGN": 1490.0}
+    }
+    mock_client = AsyncMock()
+    mock_client.get.return_value = mock_response
+    provider._http = mock_client
+
+    await provider._do_refresh()
+
+    async with pool.acquire() as conn:
+        after_count = await conn.fetchval("SELECT COUNT(*) FROM rate_snapshots")
+    assert after_count - before_count == 12, (
+        f"Expected refresh to add 12 rate_snapshot rows, "
+        f"added {after_count - before_count}"
+    )

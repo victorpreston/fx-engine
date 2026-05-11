@@ -91,7 +91,9 @@ async def clean_db():
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            TRUNCATE TABLE transactions, quotes, balances, customers
+            TRUNCATE TABLE
+                idempotency_keys, ledger_entries, transactions,
+                quotes, balances, customers
             RESTART IDENTITY CASCADE
             """
         )

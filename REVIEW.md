@@ -1,6 +1,12 @@
 # Code Review — `planted_bugs/`
 
-Reviewed as if this were a teammate's PR. I ran the tests (`pytest` passes), read the full source, and wrote additional targeted tests to confirm the production impact of each issue. Issues are ordered by severity.
+Reviewed as if a teammate had opened this as a PR and asked for my sign-off.
+
+**My approach:** I read every file in `planted_bugs/` line by line before writing anything down. I ran the existing pytest suite (all green — the bugs survive their own test coverage). For each hypothesis I formed, I wrote a targeted test or ran the code path directly to confirm the bug reproduces before flagging it. Items I suspected but could not reproduce were not included.
+
+**Tools used:** I used Claude Code as a second pair of eyes when checking edge cases — the same way I would use a colleague during a review. All severity rankings, production-impact reasoning, and fix proposals are my own judgment.
+
+Issues are ordered by **production impact**, not by how obvious the bug is.
 
 ---
 

@@ -10,10 +10,17 @@ precision; the final to_amount is quantized to 2 decimal places
 (ROUND_HALF_UP) at quote generation time.  The locked-in to_amount is
 stored in the quotes table and reused at execution time — the rate is
 never re-fetched on execute.
+
+Ledger model: every money-moving operation writes to ledger_entries
+(append-only) in the same transaction as the balance UPDATE.  balances is
+a materialized cache; ledger_entries is the source of truth.  Invariant:
+balance == SUM(credits) - SUM(debits) per (customer_id, currency).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
@@ -24,6 +31,9 @@ import structlog
 from app.config import settings
 from app.exceptions import (
     CustomerNotFoundError,
+    ExecutionInProgressError,
+    IdempotencyConflictError,
+    IdempotencyKeyRequiredError,
     InsufficientBalanceError,
     QuoteAlreadyExecutedError,
     QuoteExpiredError,
@@ -35,6 +45,24 @@ from app.services.metrics import quotes_created, quotes_executed, quotes_expired
 log = structlog.get_logger(__name__)
 
 QUANTUM = Decimal("0.01")
+_EXECUTE_ENDPOINT = "POST /quotes/{quote_id}/execute"
+
+
+def _after_debit_hook() -> None:
+    """No-op in production. Tests monkeypatch this to inject a failure
+    between the debit UPDATE and the credit UPDATE, proving that the
+    entire transaction rolls back atomically on error.
+    """
+    return None
+
+
+def _request_hash(quote_id: str, customer_id: str) -> str:
+    """Bind the idempotency key to the canonical execute request payload."""
+    payload = json.dumps(
+        {"endpoint": _EXECUTE_ENDPOINT, "quote_id": quote_id, "customer_id": customer_id},
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 async def generate_quote(
@@ -133,22 +161,56 @@ async def execute_quote(
 
     Deadlock prevention: balance rows are always locked in ascending
     alphabetical order by currency code.
+
+    Idempotency: Idempotency-Key is required.  The key is bound to a
+    SHA-256 hash of the request payload.  Same key + same hash returns
+    the cached transaction row.  Same key + different hash returns
+    IdempotencyConflictError (409).
+
+    Ledger: every balance mutation writes a paired debit/credit row to
+    ledger_entries in the same transaction.  _after_debit_hook() is a
+    no-op in production; tests override it to prove rollback atomicity.
     """
+    if not idempotency_key:
+        raise IdempotencyKeyRequiredError()
+
+    req_hash = _request_hash(quote_id, customer_id)
+
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # ── 1. Idempotency: return cached response if key was seen ──────
-            if idempotency_key:
-                existing = await conn.fetchrow(
-                    "SELECT * FROM transactions WHERE idempotency_key = $1",
-                    idempotency_key,
-                )
-                if existing is not None:
-                    log.info(
-                        "idempotent_replay",
-                        idempotency_key=idempotency_key,
-                        transaction_id=str(existing["id"]),
+            # ── 1. Idempotency: check for existing key inside transaction ──
+            existing_idem = await conn.fetchrow(
+                "SELECT * FROM idempotency_keys WHERE endpoint = $1 AND key = $2",
+                _EXECUTE_ENDPOINT,
+                idempotency_key,
+            )
+            if existing_idem is not None:
+                if existing_idem["request_hash"] != req_hash:
+                    raise IdempotencyConflictError(idempotency_key)
+                if existing_idem["completed_at"] is not None:
+                    # Completed replay — return stored transaction row.
+                    log.info("idempotent_replay", idempotency_key=idempotency_key)
+                    tx = await conn.fetchrow(
+                        "SELECT * FROM transactions WHERE idempotency_key = $1",
+                        idempotency_key,
                     )
-                    return existing
+                    return tx
+                # completed_at is NULL: a previous call with this key is still
+                # in-flight or failed mid-execute before completing.  Tell the
+                # client to retry rather than racing to execute a second time.
+                raise ExecutionInProgressError(idempotency_key)
+
+            # Reserve the idempotency slot (in-flight guard).
+            await conn.execute(
+                """
+                INSERT INTO idempotency_keys (endpoint, key, request_hash)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (endpoint, key) DO NOTHING
+                """,
+                _EXECUTE_ENDPOINT,
+                idempotency_key,
+                req_hash,
+            )
 
             # ── 2. Lock the quote row (SELECT FOR UPDATE) ─────────────────
             quote = await conn.fetchrow(
@@ -213,31 +275,13 @@ async def execute_quote(
             if available < from_amount:
                 raise InsufficientBalanceError(from_ccy, from_amount, available)
 
-            # ── 5. Execute: debit source, credit destination, mark quote ──
+            # ── 5. Mark quote executed ────────────────────────────────────
             await conn.execute(
                 "UPDATE quotes SET status = 'executed' WHERE id = $1",
                 quote_id,
             )
-            await conn.execute(
-                """
-                UPDATE balances SET amount = amount - $1, updated_at = NOW()
-                WHERE customer_id = $2 AND currency = $3
-                """,
-                str(from_amount),
-                customer_id,
-                from_ccy,
-            )
-            await conn.execute(
-                """
-                UPDATE balances SET amount = amount + $1, updated_at = NOW()
-                WHERE customer_id = $2 AND currency = $3
-                """,
-                str(to_amount),
-                customer_id,
-                to_ccy,
-            )
 
-            # ── 6. Record transaction (idempotency key stored here) ────────
+            # ── 6. Record transaction ─────────────────────────────────────
             tx = await conn.fetchrow(
                 """
                 INSERT INTO transactions
@@ -256,6 +300,79 @@ async def execute_quote(
                 str(from_amount),
                 str(to_amount),
                 str(rate),
+            )
+
+            # ── 7. Debit source balance + ledger entry ────────────────────
+            await conn.execute(
+                """
+                UPDATE balances SET amount = amount - $1, updated_at = NOW()
+                WHERE customer_id = $2 AND currency = $3
+                """,
+                str(from_amount),
+                customer_id,
+                from_ccy,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ledger_entries
+                    (customer_id, currency, amount, direction, reference_type, reference_id)
+                VALUES ($1, $2, $3, 'debit', 'execution', $4)
+                """,
+                customer_id,
+                from_ccy,
+                str(from_amount),
+                str(tx["id"]),
+            )
+
+            # Test hook — overridden by monkeypatch in atomicity tests to prove
+            # that a failure here rolls back the entire transaction.
+            _after_debit_hook()
+
+            # ── 8. Credit destination balance + ledger entry ──────────────
+            await conn.execute(
+                """
+                UPDATE balances SET amount = amount + $1, updated_at = NOW()
+                WHERE customer_id = $2 AND currency = $3
+                """,
+                str(to_amount),
+                customer_id,
+                to_ccy,
+            )
+            await conn.execute(
+                """
+                INSERT INTO ledger_entries
+                    (customer_id, currency, amount, direction, reference_type, reference_id)
+                VALUES ($1, $2, $3, 'credit', 'execution', $4)
+                """,
+                customer_id,
+                to_ccy,
+                str(to_amount),
+                str(tx["id"]),
+            )
+
+            # ── 9. Mark idempotency key completed + store response snapshot ──
+            stored_payload = json.dumps({
+                "id": str(tx["id"]),
+                "quote_id": str(tx["quote_id"]),
+                "customer_id": str(tx["customer_id"]),
+                "from_currency": tx["from_currency"],
+                "to_currency": tx["to_currency"],
+                "from_amount": str(Decimal(str(tx["from_amount"]))),
+                "to_amount": str(Decimal(str(tx["to_amount"]))),
+                "rate": str(Decimal(str(tx["rate"]))),
+                "status": tx["status"],
+                "executed_at": tx["executed_at"].isoformat(),
+            })
+            await conn.execute(
+                """
+                UPDATE idempotency_keys
+                   SET completed_at = NOW(), status_code = 200,
+                       response_payload = $3::jsonb
+                 WHERE endpoint = $1 AND key = $2
+                """,
+                _EXECUTE_ENDPOINT,
+                idempotency_key,
+                stored_payload,
             )
 
         log.info(

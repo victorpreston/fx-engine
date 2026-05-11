@@ -143,18 +143,31 @@ async def credit_balance(
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    row = await conn.fetchrow(
-        """
-        INSERT INTO balances (customer_id, currency, amount)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (customer_id, currency)
-        DO UPDATE SET amount = balances.amount + EXCLUDED.amount, updated_at = NOW()
-        RETURNING currency, amount
-        """,
-        customer_id,
-        body.currency,
-        str(body.amount),
-    )
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            INSERT INTO balances (customer_id, currency, amount)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (customer_id, currency)
+            DO UPDATE SET amount = balances.amount + EXCLUDED.amount, updated_at = NOW()
+            RETURNING currency, amount
+            """,
+            customer_id,
+            body.currency,
+            str(body.amount),
+        )
+        # Append-only ledger entry — source of truth for balance history.
+        await conn.execute(
+            """
+            INSERT INTO ledger_entries
+                (customer_id, currency, amount, direction, reference_type, reference_id)
+            VALUES ($1, $2, $3, 'credit', 'credit_adjustment', gen_random_uuid())
+            """,
+            customer_id,
+            body.currency,
+            str(body.amount),
+        )
+
     log.info(
         "balance_credited",
         customer_id=customer_id,
