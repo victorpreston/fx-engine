@@ -72,6 +72,7 @@ async def test_quote_rate_is_locked_at_generation_time(
 
     # Execute uses stored rate — to_amount should not change.
     import uuid as _uuid
+
     quote_id = resp.json()["quote_id"]
     exec_resp = await client.post(
         f"/quotes/{quote_id}/execute",

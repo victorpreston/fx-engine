@@ -20,7 +20,8 @@ async def test_healthz_returns_ok_even_with_stale_rates(client, monkeypatch):
     monkeypatch.setattr(
         rate_provider,
         "_fetched_at",
-        datetime.now(timezone.utc) - timedelta(seconds=settings.rate_stale_seconds + 60),
+        datetime.now(timezone.utc)
+        - timedelta(seconds=settings.rate_stale_seconds + 60),
     )
     resp = await client.get("/healthz")
     assert resp.status_code == 200
@@ -44,7 +45,8 @@ async def test_readyz_not_ready_when_rates_stale(client, monkeypatch):
     monkeypatch.setattr(
         rate_provider,
         "_fetched_at",
-        datetime.now(timezone.utc) - timedelta(seconds=settings.rate_stale_seconds + 60),
+        datetime.now(timezone.utc)
+        - timedelta(seconds=settings.rate_stale_seconds + 60),
     )
     resp = await client.get("/readyz")
     assert resp.status_code == 503
