@@ -59,7 +59,11 @@ def _after_debit_hook() -> None:
 def _request_hash(quote_id: str, customer_id: str) -> str:
     """Bind the idempotency key to the canonical execute request payload."""
     payload = json.dumps(
-        {"endpoint": _EXECUTE_ENDPOINT, "quote_id": quote_id, "customer_id": customer_id},
+        {
+            "endpoint": _EXECUTE_ENDPOINT,
+            "quote_id": quote_id,
+            "customer_id": customer_id,
+        },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -351,18 +355,20 @@ async def execute_quote(
             )
 
             # ── 9. Mark idempotency key completed + store response snapshot ──
-            stored_payload = json.dumps({
-                "id": str(tx["id"]),
-                "quote_id": str(tx["quote_id"]),
-                "customer_id": str(tx["customer_id"]),
-                "from_currency": tx["from_currency"],
-                "to_currency": tx["to_currency"],
-                "from_amount": str(Decimal(str(tx["from_amount"]))),
-                "to_amount": str(Decimal(str(tx["to_amount"]))),
-                "rate": str(Decimal(str(tx["rate"]))),
-                "status": tx["status"],
-                "executed_at": tx["executed_at"].isoformat(),
-            })
+            stored_payload = json.dumps(
+                {
+                    "id": str(tx["id"]),
+                    "quote_id": str(tx["quote_id"]),
+                    "customer_id": str(tx["customer_id"]),
+                    "from_currency": tx["from_currency"],
+                    "to_currency": tx["to_currency"],
+                    "from_amount": str(Decimal(str(tx["from_amount"]))),
+                    "to_amount": str(Decimal(str(tx["to_amount"]))),
+                    "rate": str(Decimal(str(tx["rate"]))),
+                    "status": tx["status"],
+                    "executed_at": tx["executed_at"].isoformat(),
+                }
+            )
             await conn.execute(
                 """
                 UPDATE idempotency_keys
