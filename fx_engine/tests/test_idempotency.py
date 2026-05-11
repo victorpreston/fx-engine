@@ -13,6 +13,7 @@ import uuid
 from decimal import Decimal
 
 import asyncpg
+import pytest
 
 from app.config import settings
 from app.engine import fx
@@ -138,7 +139,7 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
        same transaction record as the original — proving the idempotency cache
        works for the common retry-after-timeout client pattern.
     """
-    from app.exceptions import QuoteAlreadyExecutedError
+    from app.exceptions import ExecutionInProgressError, QuoteAlreadyExecutedError
 
     key = str(uuid.uuid4())
     quote_id = pending_quote["quote_id"]
@@ -168,8 +169,10 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
 
     # Exactly one concurrent caller wins the FOR UPDATE race.
     assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {errors}"
-    # All others correctly see the quote as already executed.
-    assert all(isinstance(e, QuoteAlreadyExecutedError) for e in errors), (
+    # Others see either quote_already_executed (lost the FOR UPDATE race) or
+    # execution_in_progress (found the idempotency row with completed_at=NULL).
+    allowed = (QuoteAlreadyExecutedError, ExecutionInProgressError)
+    assert all(isinstance(e, allowed) for e in errors), (
         f"Unexpected error types: {[type(e).__name__ for e in errors]}"
     )
 
@@ -191,3 +194,105 @@ async def test_concurrent_retry_with_same_key_executes_exactly_once(
             "SELECT COUNT(*) FROM transactions WHERE quote_id = $1", quote_id
         )
     assert count == 1, f"Expected 1 transaction row, found {count}"
+
+
+async def test_in_flight_key_returns_execution_in_progress(funded_customer, pending_quote):
+    """A key with completed_at=NULL (in-flight or failed mid-execute) must return 409
+    execution_in_progress rather than racing to execute a second time."""
+    from app.exceptions import ExecutionInProgressError
+    from app.services.database import get_pool
+
+    key = str(uuid.uuid4())
+    pool = await get_pool()
+
+    # Manually insert an idempotency row with completed_at=NULL to simulate in-flight.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO idempotency_keys (endpoint, key, request_hash)
+            VALUES ('POST /quotes/{quote_id}/execute', $1, $2)
+            """,
+            key,
+            "deadbeef" * 8,  # dummy hash that matches the key
+        )
+
+    # A retry with the same key and the matching hash should get execution_in_progress.
+    # To match, we need to insert with the actual hash. Re-insert with correct hash.
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM idempotency_keys WHERE key = $1", key)
+        from app.engine.fx import _request_hash, _EXECUTE_ENDPOINT
+        real_hash = _request_hash(pending_quote["quote_id"], funded_customer["id"])
+        await conn.execute(
+            """
+            INSERT INTO idempotency_keys (endpoint, key, request_hash)
+            VALUES ($1, $2, $3)
+            """,
+            _EXECUTE_ENDPOINT,
+            key,
+            real_hash,
+        )
+
+    with pytest.raises(ExecutionInProgressError):
+        await fx.execute_quote(
+            pool=pool,
+            customer_id=funded_customer["id"],
+            quote_id=pending_quote["quote_id"],
+            idempotency_key=key,
+        )
+
+
+async def test_missing_idempotency_key_returns_400(client, funded_customer, pending_quote):
+    """Idempotency-Key is required on execute; omitting it must return 400."""
+    resp = await client.post(
+        f"/quotes/{pending_quote['quote_id']}/execute",
+        json={"customer_id": funded_customer["id"]},
+        # No Idempotency-Key header
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "idempotency_key_missing"
+
+
+async def test_same_key_different_quote_returns_409(client, funded_customer):
+    """Same Idempotency-Key with a different quote_id must return 409 idempotency_conflict."""
+    # Fund extra to allow two quotes.
+    await client.post(
+        f"/customers/{funded_customer['id']}/balances/credit",
+        json={"currency": "USD", "amount": "500.00"},
+    )
+    q1 = (await client.post(
+        "/quotes",
+        json={
+            "customer_id": funded_customer["id"],
+            "from_currency": "USD",
+            "to_currency": "EUR",
+            "amount": "50.00",
+        },
+    )).json()
+    q2 = (await client.post(
+        "/quotes",
+        json={
+            "customer_id": funded_customer["id"],
+            "from_currency": "USD",
+            "to_currency": "KES",
+            "amount": "50.00",
+        },
+    )).json()
+
+    shared_key = str(uuid.uuid4())
+
+    # First execute with q1 — succeeds.
+    r1 = await client.post(
+        f"/quotes/{q1['quote_id']}/execute",
+        json={"customer_id": funded_customer["id"]},
+        headers={"Idempotency-Key": shared_key},
+    )
+    assert r1.status_code == 200
+
+    # Second execute with same key but different quote — must be 409.
+    r2 = await client.post(
+        f"/quotes/{q2['quote_id']}/execute",
+        json={"customer_id": funded_customer["id"]},
+        headers={"Idempotency-Key": shared_key},
+    )
+    assert r2.status_code == 409
+    assert r2.json()["error_code"] == "idempotency_conflict"

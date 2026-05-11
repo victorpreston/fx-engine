@@ -104,24 +104,50 @@ KYC enforcement on execute is **out of scope** for this submission (no auth laye
 
 ---
 
+## Ledger Model
+
+All money movements write to an append-only `ledger_entries` table in the same transaction as the balance update. `balances` is a materialized cache; `ledger_entries` is the source of truth.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID | Entry identifier |
+| `customer_id` | UUID | FK to customers |
+| `currency` | CHAR(3) | Currency of the entry |
+| `amount` | NUMERIC(20, 8) | Always positive |
+| `direction` | enum | `debit` or `credit` |
+| `reference_type` | TEXT | `execution` or `credit_adjustment` |
+| `reference_id` | UUID | FK to the triggering record |
+| `created_at` | TIMESTAMPTZ | Write timestamp |
+
+**Invariant:** `balance(customer, ccy) = SUM(credits) − SUM(debits)` per `(customer_id, currency)`. This is asserted in tests after every money-moving operation and can be verified independently at any time from the ledger alone.
+
+On `POST /customers/{id}/credit`: one `credit` ledger row.  
+On `POST /quotes/{id}/execute`: one `debit` + one `credit` ledger row, both in the same transaction as the balance updates.
+
+---
+
 ## Execute (Transaction)
 
 ### Preconditions (checked in order)
-1. `Idempotency-Key` not seen before (if provided) → short-circuit return cached response
-2. Quote exists and belongs to the requesting customer
-3. `quote.status = 'pending'`
-4. `quote.expires_at > now()`
-5. `balance(customer, from_currency) >= quote.from_amount`
+1. `Idempotency-Key` header is present and non-empty — **required, not optional**
+2. Key not seen before with same request hash → short-circuit return cached response  
+3. Same key, different request hash → HTTP 409 `idempotency_conflict`
+4. Quote exists and belongs to the requesting customer
+5. `quote.status = 'pending'`
+6. `quote.expires_at > now()`
+7. `balance(customer, from_currency) >= quote.from_amount`
 
 ### Atomicity
 
-All four writes occur inside one PostgreSQL transaction:
+All writes occur inside one PostgreSQL transaction:
 1. `UPDATE quotes SET status = 'executed'`
 2. `UPDATE balances SET amount = amount - from_amount` (debit source)
-3. `UPDATE balances SET amount = amount + to_amount` (credit destination)
-4. `INSERT INTO transactions`
+3. `INSERT INTO ledger_entries` (debit row)
+4. `UPDATE balances SET amount = amount + to_amount` (credit destination)
+5. `INSERT INTO ledger_entries` (credit row)
+6. `INSERT INTO transactions`
 
-On any failure (precondition violated, DB error), the transaction rolls back and no state changes.
+On any failure (precondition violated, DB error), the transaction rolls back and no state changes. A test-only hook between steps 2–3 and 4 is used to prove rollback atomicity.
 
 ### Concurrency Safety
 
@@ -133,10 +159,12 @@ Balance rows are locked in ascending alphabetical order by currency code (`EUR` 
 
 ### Idempotency
 
-- Client sends `Idempotency-Key: <uuid>` header.
-- The key lookup runs inside the same transaction as the execute, before the `FOR UPDATE` lock. If the key is found, the cached transaction row is returned immediately with HTTP 200.
-- A unique index on `transactions.idempotency_key` enforces uniqueness at the DB level as a safety net.
-- Idempotency is scoped globally. Clients must use UUID-format keys.
+- `Idempotency-Key` header is **required** for `POST /quotes/{id}/execute`. Missing key → HTTP 400.
+- Request hash = `SHA-256(method + path + sorted-body-JSON)`. The hash is stored alongside the key.
+- Same key + same hash + completed result → stored response returned, HTTP 200. No balance mutations.
+- Same key + different hash → HTTP 409 `idempotency_conflict`.
+- The key lookup runs inside the same transaction as the execute, before the `FOR UPDATE` lock — preventing TOCTOU races between concurrent retries.
+- A `UNIQUE (idempotency_key)` index on `transactions` enforces uniqueness as a DB-level backstop.
 
 ---
 
@@ -158,7 +186,8 @@ Balance rows are locked in ascending alphabetical order by currency code (`EUR` 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/healthz` | DB + rates health check |
+| GET | `/healthz` | Process liveness only (no DB or rate check) |
+| GET | `/readyz` | DB reachable + rates fresh — readiness for quote traffic |
 | GET | `/metrics` | Prometheus-format metrics |
 | POST | `/customers` | Create customer (accepts `phone`, `country`) |
 | GET | `/customers` | List all customers |
@@ -183,13 +212,28 @@ Balance rows are locked in ascending alphabetical order by currency code (`EUR` 
 | HTTP Code | `error_code` | Meaning |
 |-----------|-------------|---------|
 | 400 | `invalid_amount` / `unsupported_currency_pair` | Bad input |
+| 400 | `idempotency_key_missing` | `Idempotency-Key` header absent on execute |
 | 404 | `quote_not_found` / `customer_not_found` | Resource missing |
 | 409 | `quote_expired` / `quote_already_executed` | State conflict |
+| 409 | `idempotency_conflict` | Same key, different request payload |
+| 409 | `execution_in_progress` | Same key found but previous call not yet completed — retry shortly |
 | 422 | `insufficient_balance` | Not enough funds |
 | 503 | `rates_unavailable` | Rate source stale or unreachable |
 | 500 | `internal_error` | Unexpected server error |
 
-All error responses include `request_id` for log correlation.
+**Error envelope format:** all errors return `{"error": "...", "error_code": "...", "request_id": "..."}`. This is a deliberate simplified format — not RFC 7807 problem+json. The `error_code` is a stable machine-readable string; `request_id` links to the structured log entry for the request.
+
+---
+
+## Health Endpoints
+
+**`GET /healthz`** — process liveness only. Returns `{"status": "ok"}` unconditionally as long as the process is running. This is the load-balancer/liveness probe; it does not check the database or rate freshness.
+
+**`GET /readyz`** — readiness for quote traffic. Returns:
+- `{"status": "ready", "database": "ok", "rates": "ok"}` (HTTP 200) when both checks pass.
+- `{"status": "not_ready", "database": ..., "rates": ...}` (HTTP 503) if the DB is unreachable or rates are stale.
+
+Separating liveness from readiness means a stale-rate condition pulls the service out of the load balancer rotation without triggering a process restart.
 
 ---
 
@@ -198,7 +242,8 @@ All error responses include `request_id` for log correlation.
 - **Structured JSON logs** (structlog) — every log record includes `request_id`, `method`, `path`, `status_code`, `duration_ms`.
 - **X-Request-ID** — attached to every response; propagated from client header if provided.
 - **Prometheus metrics** at `/metrics`: `fx_quotes_created_total`, `fx_quotes_executed_total`, `fx_quotes_expired_total`, `fx_quote_errors_total{error_code}`, `fx_rate_fetch_success_total`, `fx_rate_fetch_failure_total`, `fx_rates_stale`, `fx_http_request_duration_seconds` (histogram with P50/P95/P99 buckets).
-- **`/healthz`** — returns `ok`, `degraded` (stale rates), or `unhealthy` (DB unreachable).
+- **`/healthz`** — process liveness only; always `{"status": "ok"}` when the process is alive.
+- **`/readyz`** — readiness check: DB ping + rate freshness. Returns `{"status": "not_ready", ...}` (HTTP 503) when stale or DB is unreachable.
 
 ---
 
