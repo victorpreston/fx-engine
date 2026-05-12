@@ -115,10 +115,18 @@ jobs:
           curl -sf http://localhost:8000/healthz | python3 -c "
           import sys, json
           d = json.load(sys.stdin)
-          assert d['status'] in ('ok', 'degraded'), f'Bad health: {d}'
-          assert 'database' in d['components']
-          assert 'rates' in d['components']
+          assert d['status'] == 'ok', f'Bad liveness: {d}'
           print('healthz OK:', d['status'])
+          "
+
+          echo "--- /readyz ---"
+          curl -sf http://localhost:8000/readyz | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert d['status'] == 'ready', f'Bad readiness: {d}'
+          assert d['database'] == 'ok', f'Database not ready: {d}'
+          assert d['rates'] == 'ok', f'Rates not ready: {d}'
+          print('readyz OK:', d['status'])
           "
 
           echo "--- /rates ---"
