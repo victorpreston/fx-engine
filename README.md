@@ -4,6 +4,8 @@ FX engine for USD, EUR, KES, and NGN — quotes, atomic execution, per-customer 
 
 Process artifacts: [`SPEC.md`](SPEC.md) · [`DECISIONS.md`](DECISIONS.md) · [`AGENTS.md`](AGENTS.md) · [`REVIEW.md`](REVIEW.md)
 
+**Final review branch:** `fx-prod` is the production/submission branch. Changes are promoted through `dev -> staging -> fx-prod`.
+
 ## Architecture at a Glance
 
 ![FX Engine Architecture — FastAPI · PostgreSQL · Redis · RabbitMQ · Grafana](docs/architecture.png)
@@ -361,7 +363,7 @@ fx_takehome/
     │   ├── test_rates.py       # Staleness enforcement, refresh failure handling, spread correctness
     │   ├── test_customers.py   # CRUD, KYC status update, balance credit and accumulation
     │   ├── test_transactions.py# GET /transactions list + filter, GET /transactions/{id}
-    │   └── test_health.py      # /healthz component status, /metrics Prometheus format
+    │   └── test_health.py      # /healthz liveness, /readyz readiness, /metrics Prometheus format
     │
     └── monitoring/
         ├── prometheus/
